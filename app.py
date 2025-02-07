@@ -32,16 +32,28 @@ BEDROCK_AGENT_ID = "VLZFRY26GV"
 BEDROCK_AGENT_ALIAS_ID = "QT0I0B0VIG"
 UI_TITLE = "SOUTHERN AG AGENT"
 
+#####################################
 # Initialize session state
+#####################################
 def init_session_state():
-    st.session_state.session_id = str(uuid.uuid4())
-    st.session_state.messages = []
-    st.session_state.citations = []
-    st.session_state.trace = {}
-    # We'll store the KB list result here so we can show it in the UI
-    st.session_state.knowledge_bases = None
+    """
+    Ensures all necessary session state variables are defined.
+    """
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = str(uuid.uuid4())
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    if "citations" not in st.session_state:
+        st.session_state.citations = []
+    if "trace" not in st.session_state:
+        st.session_state.trace = {}
+    if "knowledge_bases" not in st.session_state:
+        # This is the fix to ensure knowledge_bases always exists
+        st.session_state.knowledge_bases = None
 
+#####################################
 # Page setup
+#####################################
 st.set_page_config(page_title=UI_TITLE, layout="wide")
 st.title(UI_TITLE)
 
@@ -60,8 +72,13 @@ def debug_log(message):
 # Initialize session state if needed
 if len(st.session_state.items()) == 0:
     init_session_state()
+else:
+    # If the script re-ran, still ensure everything is set
+    init_session_state()
 
+#####################################
 # Set up AWS credentials
+#####################################
 try:
     credentials = {
         "aws_access_key_id": st.secrets["aws"]["access_key_id"].strip(),
@@ -82,7 +99,9 @@ except Exception as e:
     st.error("Failed to configure AWS credentials. Please check your secrets configuration.")
     st.stop()
 
+#####################################
 # Initialize Bedrock client
+#####################################
 try:
     session = boto3.Session(**credentials)
     bedrock_client = session.client("bedrock-agent-runtime")
@@ -94,50 +113,38 @@ except Exception as e:
 
 st.sidebar.success(f"Connected to AWS Region: {credentials['region_name']}")
 
-###############################
-# Knowledge Base Listing Code #
-###############################
-
+#####################################
+# Knowledge Base Listing Code
+#####################################
 def list_knowledge_bases(max_results=10, next_token=None):
     """
     Calls the /knowledgebases/ endpoint directly using SigV4 signing.
-    Reference: 
-      POST /knowledgebases/
-      { "maxResults": number, "nextToken": "string" }
+    POST /knowledgebases/
+    { "maxResults": number, "nextToken": "string" }
     """
-    # We'll build the URL for the bedrock service in the chosen region
     region = credentials["region_name"]
     service = "bedrock"
     host = f"bedrock.{region}.amazonaws.com"
     endpoint = f"https://{host}/knowledgebases/"
     
-    # Prepare the JSON payload
-    payload = {}
-    payload["maxResults"] = max_results
+    payload = {"maxResults": max_results}
     if next_token:
         payload["nextToken"] = next_token
     
-    # Convert to JSON
     data = json.dumps(payload)
     
-    # We'll sign this request using botocore's SigV4Auth
     req = AWSRequest(
         method="POST",
         url=endpoint,
         data=data,
-        headers={
-            "Content-Type": "application/json",
-        }
+        headers={"Content-Type": "application/json"}
     )
-    # Use Boto3 session's credentials to sign
-    # We'll make a ephemeral client config
     botocore_creds = session.get_credentials()
     req.context["client_region"] = region
     req.context["has_streaming_input"] = False
 
     SigV4Auth(botocore_creds, service, region).add_auth(req)
 
-    # Convert AWSRequest to python-requests request
     prepared_request = requests.Request(
         method=req.method,
         url=req.url,
@@ -145,24 +152,28 @@ def list_knowledge_bases(max_results=10, next_token=None):
         data=req.data
     ).prepare()
 
-    # We'll use requests.Session to send the request
     with requests.Session() as s:
         response = s.send(prepared_request)
     
     if debug_mode:
         st.write("ListKnowledgeBases status code:", response.status_code)
-        st.json(response.json())
+        try:
+            st.json(response.json())
+        except Exception as ex:
+            st.write("Could not parse JSON from response:", str(ex))
 
     if response.status_code != 200:
-        # Raise a custom exception or just show an error
         raise Exception(f"ListKnowledgeBases failed: {response.status_code} - {response.text}")
     
     return response.json()
 
-# Sidebar button to reset session
+#####################################
+# Sidebar buttons
+#####################################
 with st.sidebar:
     if st.button("Reset Session"):
         init_session_state()
+        st.experimental_rerun()
 
     # Button to list knowledge bases
     if st.button("List Knowledge Bases"):
@@ -182,15 +193,10 @@ if st.session_state.knowledge_bases:
         kb_status = kb.get("status", "N/A")
         st.sidebar.write(f"• {kb_name} (ID={kb_id}, Status={kb_status})")
 
-#######################
-# Chat Logic (below)  #
-#######################
-
+#####################################
+# Throttling / EventStream
+#####################################
 def process_event_stream(response_stream):
-    """
-    Processes streaming responses from Bedrock.
-    If a chunk indicates throttling, we'll raise an exception so the retry logic can catch it.
-    """
     logger.info("Processing EventStream response from Bedrock agent.")
     output_text = []
 
@@ -199,8 +205,6 @@ def process_event_stream(response_stream):
             st.write("Event received:", event)
         logger.info(f"Received event: {event}")
 
-        # If there's an immediate error chunk with "Your request rate is too high",
-        # We can handle that. Usually these come as an 'error' chunk, but can vary by model.
         if isinstance(event, dict) and "error" in event:
             err = event["error"].get("message", "")
             if "Your request rate is too high" in err:
@@ -230,10 +234,6 @@ def process_event_stream(response_stream):
     return final_text if final_text else "No response generated"
 
 def parse_usage_info(response):
-    """
-    Try to extract usage stats (e.g., tokens used) from the response.
-    For many models, usage is found in response["modelInvocationOutput"]["metadata"]["usage"].
-    """
     usage_data = {}
     try:
         if isinstance(response, dict) and "modelInvocationOutput" in response:
@@ -252,22 +252,15 @@ def debug_log_dict(response_dict, message="Raw dictionary response from Bedrock:
         debug_log(f"Failed to JSON-dump the response: {str(e)}")
 
 def process_dict_response(response):
-    """
-    Processes dictionary responses from Bedrock (Agent or Model).
-    We'll detect if the dictionary has a 'completion' field that is an EventStream,
-    then handle it accordingly.
-    """
     debug_log_dict(response)
 
     top_keys = list(response.keys())
     debug_log(f"Top-level keys in response: {top_keys}")
 
-    # If the 'completion' field is an EventStream, parse it that way
     if "completion" in response and isinstance(response["completion"], (EventStream, botocore.eventstream.EventStream)):
         debug_log("'completion' is an EventStream -> using process_event_stream()")
         return process_event_stream(response["completion"])
 
-    # 1) If it looks like a Bedrock Agent response with 'modelInvocationOutput'
     if "modelInvocationOutput" in response:
         debug_log("Detected 'modelInvocationOutput' key -> Attempting to parse agent response")
         agent_output = response["modelInvocationOutput"]
@@ -281,7 +274,6 @@ def process_dict_response(response):
                 parsed_json = json.loads(raw_json_str)
                 debug_log(f"Keys in parsed_json: {list(parsed_json.keys())}")
 
-                # sometimes finalResponse is in response["observation"][-1]
                 if "observation" in response and isinstance(response["observation"], list):
                     debug_log(f"Found 'observation' array with length {len(response['observation'])}")
                     final_obs = response["observation"][-1]
@@ -291,7 +283,6 @@ def process_dict_response(response):
                             debug_log(f"Extracted finalResponse.text with length: {len(final_resp)}")
                             return final_resp
 
-                # otherwise parse 'content' array
                 if "content" in parsed_json and isinstance(parsed_json["content"], list):
                     text_chunks = []
                     for item in parsed_json["content"]:
@@ -309,7 +300,6 @@ def process_dict_response(response):
                 debug_log(f"JSONDecodeError parsing Agent 'rawResponse': {str(jerr)}")
                 return "Error: Failed to parse the Agent rawResponse JSON."
 
-    # 2) Check for a standard model-based response with top-level "completion"
     if "completion" in response:
         debug_log("Detected top-level 'completion' key -> Attempting to parse model style response")
         completion = response["completion"]
@@ -319,7 +309,6 @@ def process_dict_response(response):
             debug_log("completion is not a dict, can't parse further.")
             return "Error: Invalid 'completion' format"
 
-        # Check for standard structure
         if "promptOutput" in completion:
             prompt_output = completion["promptOutput"]
             debug_log(f"Found 'promptOutput' in completion. Keys: {list(prompt_output.keys()) if isinstance(prompt_output, dict) else 'not dict'}")
@@ -331,7 +320,6 @@ def process_dict_response(response):
                 else:
                     debug_log("No text in promptOutput.")
 
-        # If no promptOutput, see if there's a direct 'text' key in 'completion'
         if "text" in completion:
             text_val = completion["text"]
             if text_val:
@@ -381,6 +369,9 @@ def invoke_agent_with_backoff(prompt, max_retries=2, backoff_base=60):
             logger.error(f"Unexpected error: {str(ex)}", exc_info=True)
             raise ex
 
+#####################################
+# Chat Input Logic
+#####################################
 prompt = st.chat_input()
 if prompt:
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -426,7 +417,9 @@ if prompt:
 
             st.session_state.messages.append({"role": "assistant", "content": output_text})
 
-# Finally re-render the conversation
+#####################################
+# Conversation Rerender
+#####################################
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"], unsafe_allow_html=True)
