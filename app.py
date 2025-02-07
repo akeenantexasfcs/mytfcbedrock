@@ -9,11 +9,15 @@ import logging
 import os
 import re
 import time
+import requests
 import streamlit as st
 import uuid
 import boto3
 import botocore
 from botocore.eventstream import EventStream
+from botocore.auth import SigV4Auth
+from botocore.awsrequest import AWSRequest
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
 # Configure logging
@@ -34,6 +38,8 @@ def init_session_state():
     st.session_state.messages = []
     st.session_state.citations = []
     st.session_state.trace = {}
+    # We'll store the KB list result here so we can show it in the UI
+    st.session_state.knowledge_bases = None
 
 # Page setup
 st.set_page_config(page_title=UI_TITLE, layout="wide")
@@ -88,10 +94,97 @@ except Exception as e:
 
 st.sidebar.success(f"Connected to AWS Region: {credentials['region_name']}")
 
+###############################
+# Knowledge Base Listing Code #
+###############################
+
+def list_knowledge_bases(max_results=10, next_token=None):
+    """
+    Calls the /knowledgebases/ endpoint directly using SigV4 signing.
+    Reference: 
+      POST /knowledgebases/
+      { "maxResults": number, "nextToken": "string" }
+    """
+    # We'll build the URL for the bedrock service in the chosen region
+    region = credentials["region_name"]
+    service = "bedrock"
+    host = f"bedrock.{region}.amazonaws.com"
+    endpoint = f"https://{host}/knowledgebases/"
+    
+    # Prepare the JSON payload
+    payload = {}
+    payload["maxResults"] = max_results
+    if next_token:
+        payload["nextToken"] = next_token
+    
+    # Convert to JSON
+    data = json.dumps(payload)
+    
+    # We'll sign this request using botocore's SigV4Auth
+    req = AWSRequest(
+        method="POST",
+        url=endpoint,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+        }
+    )
+    # Use Boto3 session's credentials to sign
+    # We'll make a ephemeral client config
+    botocore_creds = session.get_credentials()
+    req.context["client_region"] = region
+    req.context["has_streaming_input"] = False
+
+    SigV4Auth(botocore_creds, service, region).add_auth(req)
+
+    # Convert AWSRequest to python-requests request
+    prepared_request = requests.Request(
+        method=req.method,
+        url=req.url,
+        headers=dict(req.headers),
+        data=req.data
+    ).prepare()
+
+    # We'll use requests.Session to send the request
+    with requests.Session() as s:
+        response = s.send(prepared_request)
+    
+    if debug_mode:
+        st.write("ListKnowledgeBases status code:", response.status_code)
+        st.json(response.json())
+
+    if response.status_code != 200:
+        # Raise a custom exception or just show an error
+        raise Exception(f"ListKnowledgeBases failed: {response.status_code} - {response.text}")
+    
+    return response.json()
+
 # Sidebar button to reset session
 with st.sidebar:
     if st.button("Reset Session"):
         init_session_state()
+
+    # Button to list knowledge bases
+    if st.button("List Knowledge Bases"):
+        try:
+            kb_data = list_knowledge_bases()
+            st.session_state.knowledge_bases = kb_data
+            st.success("Successfully listed knowledge bases.")
+        except Exception as e:
+            st.error(f"Could not list KBs: {str(e)}")
+
+# If we've listed knowledge bases, show them
+if st.session_state.knowledge_bases:
+    st.sidebar.write("Knowledge Bases Found:")
+    for kb in st.session_state.knowledge_bases.get("knowledgeBaseSummaries", []):
+        kb_name = kb.get("name", "UnknownName")
+        kb_id = kb.get("knowledgeBaseId", "UnknownID")
+        kb_status = kb.get("status", "N/A")
+        st.sidebar.write(f"• {kb_name} (ID={kb_id}, Status={kb_status})")
+
+#######################
+# Chat Logic (below)  #
+#######################
 
 def process_event_stream(response_stream):
     """
@@ -151,19 +244,20 @@ def parse_usage_info(response):
         logger.warning(f"Could not parse usage info: {str(e)}", exc_info=True)
     return usage_data
 
+def debug_log_dict(response_dict, message="Raw dictionary response from Bedrock:"):
+    debug_log(message)
+    try:
+        debug_log(json.dumps(response_dict, indent=2, default=str))
+    except Exception as e:
+        debug_log(f"Failed to JSON-dump the response: {str(e)}")
+
 def process_dict_response(response):
     """
     Processes dictionary responses from Bedrock (Agent or Model).
     We'll detect if the dictionary has a 'completion' field that is an EventStream,
     then handle it accordingly.
     """
-    debug_log("Raw dictionary response from Bedrock:")
-
-    try:
-        # Dump safely
-        debug_log(json.dumps(response, indent=2, default=str))
-    except Exception as e:
-        debug_log(f"Failed to JSON-dump the response: {str(e)}")
+    debug_log_dict(response)
 
     top_keys = list(response.keys())
     debug_log(f"Top-level keys in response: {top_keys}")
@@ -252,7 +346,6 @@ def process_dict_response(response):
     debug_log("No recognized response format found. Returning error.")
     return "Error: Invalid response format"
 
-# Single function to make the Bedrock call with backoff
 def invoke_agent_with_backoff(prompt, max_retries=2, backoff_base=60):
     """
     Attempt to call invoke_agent. If we get throttled, wait and retry up to max_retries times.
@@ -283,7 +376,6 @@ def invoke_agent_with_backoff(prompt, max_retries=2, backoff_base=60):
                     st.error("Max retries reached. Still throttled. Please wait or reduce request rate.")
                     raise e  # re-raise so we display an error
             else:
-                # Not a throttling exception, just re-raise
                 raise e
         except Exception as ex:
             logger.error(f"Unexpected error: {str(ex)}", exc_info=True)
@@ -301,16 +393,12 @@ if prompt:
 
             try:
                 debug_log("Starting agent invocation with backoff.")
-                # Single invocation with combined knowledge bases (if your agent is attached to them)
                 response = invoke_agent_with_backoff(prompt)
 
-                # parse the text from the response
                 if isinstance(response, (botocore.eventstream.EventStream, EventStream)):
-                    # event stream response
                     logger.info("Processing EventStream response from Bedrock agent.")
                     output_text = process_event_stream(response)
                 elif isinstance(response, dict):
-                    # dictionary response
                     logger.info("Processing dictionary response from Bedrock agent.")
                     output_text = process_dict_response(response)
                 else:
@@ -320,7 +408,6 @@ if prompt:
                 if not output_text:
                     output_text = "No response generated"
 
-                # Also parse usage info for debugging
                 usage_info = parse_usage_info(response)
                 logger.info(f"Usage info from Bedrock: {usage_info}")
 
@@ -329,7 +416,6 @@ if prompt:
                     st.json(usage_info)
 
             except ClientError as e:
-                # We handle any leftover client errors
                 logger.error(f"ClientError after attempts: {str(e)}", exc_info=True)
                 st.error(f"AWS Error: {e.response['Error']['Message']}")
                 output_text = "Sorry, there was an error processing your request."
