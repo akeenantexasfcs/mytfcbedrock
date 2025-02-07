@@ -167,44 +167,44 @@ if prompt := st.chat_input():
                     )
                     
                     logger.info(f"Response type: {type(response)}")
-                    if debug_mode:
-                        st.write("Raw response:", response)
                     
-                    # Initialize output variables
-                    output_text = ""
+                    # Initialize variables
+                    output_text = "No response generated"
                     citations = []
                     trace = {}
                     
-                    # Handle different response types
-                    if isinstance(response, botocore.eventstream.EventStream):
-                        full_response = []
+                    # If response is a dictionary, process it normally
+                    if isinstance(response, dict):
+                        logger.info("Processing JSON response from Bedrock agent.")
+                        if debug_mode:
+                            st.write("Response keys:", response.keys())
+                        output_text = response.get('completion', {}).get('promptOutput', {}).get('text', 'No response generated')
+                        citations = response.get('citations', [])
+                        trace = response.get('trace', {})
+                    elif isinstance(response, botocore.eventstream.EventStream):
+                        logger.info("Processing EventStream response from Bedrock agent.")
+                        chunks = []
                         for event in response:
-                            logger.info(f"Received event: {event}")
+                            if debug_mode:
+                                st.write("Event:", event)
                             if "chunk" in event:
                                 chunk_text = event["chunk"].get("bytes", "").decode("utf-8")
-                                full_response.append(chunk_text)
-                        output_text = "".join(full_response)
-                    elif isinstance(response, dict):
-                        if 'completion' in response:
-                            output_text = response['completion'].get('promptOutput', {}).get('text', '')
-                            citations = response.get('citations', [])
-                            trace = response.get('trace', {})
-                        else:
-                            logger.error(f"Unexpected response format: {response.keys()}")
-                            output_text = "Error: Unexpected response format"
+                                chunks.append(chunk_text)
+                        output_text = "".join(chunks)
+                    else:
+                        logger.error(f"Unexpected response type: {type(response)}")
+                        output_text = "Error: Unexpected response format from Bedrock."
                     
-                    if not output_text:
-                        output_text = "No response generated"
-                    
-                    logger.info(f"Final output text: {output_text}")
+                    logger.info(f"Extracted output text: {output_text}")
                     logger.info(f"Citations found: {len(citations)}")
                     logger.info(f"Trace data present: {'Yes' if trace else 'No'}")
                     
                     if debug_mode:
                         st.json({
+                            "Response Type": str(type(response)),
                             "Output Length": len(output_text),
-                            "Number of Citations": len(citations),
-                            "Has Trace Data": bool(trace)
+                            "Citations Count": len(citations),
+                            "Has Trace": bool(trace)
                         })
 
                     # No need to process citations and trace as they're not part of the stream
