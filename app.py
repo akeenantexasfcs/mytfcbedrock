@@ -18,7 +18,7 @@ from botocore.exceptions import ClientError
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
@@ -27,79 +27,12 @@ BEDROCK_AGENT_ID = "VLZFRY26GV"
 BEDROCK_AGENT_ALIAS_ID = "QT0I0B0VIG"
 UI_TITLE = "SOUTHERN AG AGENT"
 
+# Initialize session state
 def init_session_state():
     st.session_state.session_id = str(uuid.uuid4())
     st.session_state.messages = []
     st.session_state.citations = []
     st.session_state.trace = {}
-
-def safe_get(obj, key, default=None):
-    """Safely get a value from a dictionary or EventStream"""
-    try:
-        if hasattr(obj, 'get'):
-            return obj.get(key, default)
-        elif hasattr(obj, key):
-            return getattr(obj, key)
-        return default
-    except Exception as e:
-        logger.error(f"Error accessing {key}: {str(e)}")
-        return default
-
-def process_event_stream(stream):
-    """Process an EventStream response"""
-    try:
-        full_text = []
-        for event in stream:
-            if debug_mode:
-                st.write("Event received:", event)
-            logger.info(f"Processing event type: {type(event)}")
-            
-            # Try different ways to extract text from the event
-            if hasattr(event, 'chunk'):
-                chunk = event.chunk
-                if hasattr(chunk, 'bytes'):
-                    text = chunk.bytes.decode('utf-8')
-                    full_text.append(text)
-            elif isinstance(event, dict):
-                if 'chunk' in event:
-                    chunk_data = event['chunk']
-                    if isinstance(chunk_data, bytes):
-                        text = chunk_data.decode('utf-8')
-                        full_text.append(text)
-                    elif isinstance(chunk_data, dict) and 'bytes' in chunk_data:
-                        text = chunk_data['bytes'].decode('utf-8')
-                        full_text.append(text)
-            
-            logger.info(f"Processed event, current text length: {len(''.join(full_text))}")
-            
-        return ''.join(full_text)
-    except Exception as e:
-        logger.error(f"Error processing event stream: {str(e)}", exc_info=True)
-        return "Error processing response stream"
-
-def process_dict_response(response):
-    """Process a dictionary response"""
-    try:
-        if 'completion' not in response:
-            logger.error(f"Response missing 'completion'. Keys: {list(response.keys())}")
-            return "Error: Invalid response format (missing completion)"
-            
-        completion = response['completion']
-        if not isinstance(completion, dict):
-            logger.error(f"Completion is not a dictionary: {type(completion)}")
-            return "Error: Invalid completion format"
-            
-        prompt_output = completion.get('promptOutput', {})
-        if not isinstance(prompt_output, dict):
-            logger.error(f"PromptOutput is not a dictionary: {type(prompt_output)}")
-            return "Error: Invalid promptOutput format"
-            
-        text = prompt_output.get('text', '')
-        logger.info(f"Successfully extracted text of length: {len(text)}")
-        return text
-    except Exception as e:
-        logger.error(f"Error processing dictionary response: {str(e)}", exc_info=True)
-        return "Error processing response"
 
 # Page setup
 st.set_page_config(page_title=UI_TITLE, layout="wide")
@@ -111,6 +44,12 @@ with st.sidebar:
     if debug_mode:
         st.info("Debug mode enabled")
 
+# Helper function for logging in debug mode
+def debug_log(message):
+    if debug_mode:
+        st.info(f"🔍 Debug: {message}")
+    logger.info(message)
+
 # Initialize session state if needed
 if len(st.session_state.items()) == 0:
     init_session_state()
@@ -118,18 +57,19 @@ if len(st.session_state.items()) == 0:
 # Set up AWS credentials
 try:
     credentials = {
-        'aws_access_key_id': st.secrets["aws"]["access_key_id"].strip(),
-        'aws_secret_access_key': st.secrets["aws"]["secret_access_key"].strip(),
-        'region_name': st.secrets["aws"]["region"].strip()
+        "aws_access_key_id": st.secrets["aws"]["access_key_id"].strip(),
+        "aws_secret_access_key": st.secrets["aws"]["secret_access_key"].strip(),
+        "region_name": st.secrets["aws"]["region"].strip(),
     }
-    
+
     logger.info(f"AWS Region: {credentials['region_name']}")
     logger.info(f"Access Key ID length: {len(credentials['aws_access_key_id'])}")
     logger.info(f"Secret Key length: {len(credentials['aws_secret_access_key'])}")
-    
-    os.environ['AWS_ACCESS_KEY_ID'] = credentials['aws_access_key_id']
-    os.environ['AWS_SECRET_ACCESS_KEY'] = credentials['aws_secret_access_key']
-    os.environ['AWS_DEFAULT_REGION'] = credentials['region_name']
+
+    os.environ["AWS_ACCESS_KEY_ID"] = credentials["aws_access_key_id"]
+    os.environ["AWS_SECRET_ACCESS_KEY"] = credentials["aws_secret_access_key"]
+    os.environ["AWS_DEFAULT_REGION"] = credentials["region_name"]
+
 except Exception as e:
     logger.error(f"Error setting up AWS credentials: {str(e)}")
     st.error("Failed to configure AWS credentials. Please check your secrets configuration.")
@@ -138,7 +78,7 @@ except Exception as e:
 # Initialize Bedrock client
 try:
     session = boto3.Session(**credentials)
-    bedrock_client = session.client('bedrock-agent-runtime')
+    bedrock_client = session.client("bedrock-agent-runtime")
     logger.info("Bedrock client initialized successfully")
 except Exception as e:
     logger.error(f"Error initializing Bedrock client: {str(e)}")
@@ -168,80 +108,89 @@ if prompt := st.chat_input():
         with st.empty():
             try:
                 logger.info(f"Invoking Bedrock agent with prompt: {prompt}")
-                if debug_mode:
-                    st.info("Starting agent invocation...")
-                
+                debug_log("Starting agent invocation...")
+
                 with st.spinner("Processing your request..."):
-                    # Log configuration
+                    # Log agent configuration
                     logger.info(f"Agent ID: {BEDROCK_AGENT_ID}")
                     logger.info(f"Agent Alias ID: {BEDROCK_AGENT_ALIAS_ID}")
                     logger.info(f"Session ID: {st.session_state.session_id}")
-                    
-                    # Make the API call
+
+                    # Invoke Bedrock agent
                     response = bedrock_client.invoke_agent(
                         agentId=BEDROCK_AGENT_ID,
                         agentAliasId=BEDROCK_AGENT_ALIAS_ID,
                         sessionId=st.session_state.session_id,
-                        inputText=prompt
+                        inputText=prompt,
                     )
-                    
+
                     # Initialize default values
                     output_text = "No response generated"
                     citations = []
                     trace = {}
-                    
-                    # FIRST check if it's an EventStream
-                    if isinstance(response, (botocore.eventstream.EventStream, EventStream)):
+
+                    # Log response type
+                    logger.info(f"Response type: {type(response)}")
+                    if debug_mode:
+                        st.write(f"Response type: {type(response)}")
+
+                    # Process JSON response
+                    if isinstance(response, dict):
+                        logger.info("Processing JSON response from Bedrock agent.")
+                        if debug_mode:
+                            st.write("Response keys:", response.keys())
+
+                        output_text = (
+                            response.get("completion", {}).get("promptOutput", {}).get("text", "No response generated")
+                        )
+                        citations = response.get("citations", [])
+                        trace = response.get("trace", {})
+
+                    # Process EventStream response
+                    elif isinstance(response, (botocore.eventstream.EventStream, EventStream)):
                         logger.info("Processing EventStream response from Bedrock agent.")
-                        chunks = []
+                        output_chunks = []
+
                         for event in response:
                             if debug_mode:
                                 st.write("Event received:", event)
                             logger.info(f"Received event: {event}")
+
+                            # Extract text from EventStream chunk
                             try:
-                                if hasattr(event, 'chunk'):
-                                    chunk = event.chunk
-                                    if hasattr(chunk, 'bytes'):
-                                        text = chunk.bytes.decode('utf-8')
-                                        chunks.append(text)
-                                elif isinstance(event, dict) and "chunk" in event:
-                                    chunk_text = event["chunk"].get("bytes", b"").decode("utf-8")
-                                    chunks.append(chunk_text)
+                                if isinstance(event, dict) and "chunk" in event:
+                                    chunk_data = event["chunk"]
+                                    if isinstance(chunk_data, dict) and "bytes" in chunk_data:
+                                        chunk_text = chunk_data["bytes"].decode("utf-8")
+                                        output_chunks.append(chunk_text)
                             except Exception as chunk_error:
                                 logger.error(f"Error processing chunk: {str(chunk_error)}")
                                 continue
-                        
-                        output_text = "".join(chunks)
+
+                        output_text = "".join(output_chunks)
                         if debug_mode:
                             st.write(f"Assembled text length: {len(output_text)}")
-                            
-                    # Only try dictionary methods if it's actually a dictionary
-                    elif isinstance(response, dict):
-                        logger.info("Processing dictionary response from Bedrock agent.")
-                        if debug_mode:
-                            st.write("Response keys:", response.keys())
-                        output_text = response.get("completion", {}).get("promptOutput", {}).get("text", "No response generated")
-                        citations = response.get("citations", [])
-                        trace = response.get("trace", {})
-                    
+
                     else:
                         logger.error(f"Unexpected response type: {type(response)}")
                         output_text = "Error: Unexpected response format from Bedrock."
-                    
+
                     if not output_text:
                         output_text = "No response generated"
-                    
+
                     logger.info(f"Extracted output text: {output_text}")
                     logger.info(f"Citations found: {len(citations)}")
                     logger.info(f"Trace data present: {'Yes' if trace else 'No'}")
-                    
+
                     if debug_mode:
-                        st.json({
-                            "Response Type": str(type(response)),
-                            "Output Length": len(output_text),
-                            "Citations Count": len(citations),
-                            "Has Trace": bool(trace)
-                        })
+                        st.json(
+                            {
+                                "Response Type": str(type(response)),
+                                "Output Length": len(output_text),
+                                "Citations Count": len(citations),
+                                "Has Trace": bool(trace),
+                            }
+                        )
 
             except ClientError as e:
                 error_code = e.response["Error"]["Code"]
@@ -249,16 +198,16 @@ if prompt := st.chat_input():
                 logger.error(f"AWS Error: {error_code} - {error_message}")
                 st.error(f"AWS Error: {error_message}")
                 output_text = "Sorry, there was an error processing your request."
-            
+
             except Exception as e:
                 logger.error(f"Unexpected error: {str(e)}", exc_info=True)
                 st.error(f"An unexpected error occurred: {str(e)}")
                 output_text = "Sorry, there was an error processing your request."
 
-            # Update conversation and display response
+            # Update session state and display response
             st.session_state.messages.append({"role": "assistant", "content": output_text})
             st.markdown(output_text, unsafe_allow_html=True)
-            
+
             if debug_mode:
                 st.write("Response processing complete")
 
