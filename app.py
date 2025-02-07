@@ -57,20 +57,27 @@ def process_agent_response(event_stream):
     trace = {}
     
     try:
+        # The Bedrock agent returns a streaming body (EventStream). 
+        # We iterate chunk by chunk, each chunk is typically JSON or partial text.
         for event in event_stream:
             if 'chunk' in event:
-                chunk_data = event['chunk']['bytes'].decode('utf-8')
+                chunk_bytes = event['chunk']['bytes']
+                chunk_str = chunk_bytes.decode('utf-8')
+                
+                # Attempt to parse chunk as JSON
                 try:
-                    chunk_json = json.loads(chunk_data)
+                    chunk_json = json.loads(chunk_str)
+                    # The chunk might contain partial or full response text
                     if 'completion' in chunk_json:
                         full_response += chunk_json['completion']
                     if 'citations' in chunk_json:
                         citations.extend(chunk_json['citations'])
                     if 'trace' in chunk_json:
                         trace.update(chunk_json['trace'])
-                except json.JSONDecodeError as e:
-                    logger.warning(f"Failed to parse chunk as JSON: {e}")
-                    full_response += chunk_data
+                except json.JSONDecodeError:
+                    # If we fail to parse the chunk as JSON, just treat it as raw text
+                    full_response += chunk_str
+
     except Exception as e:
         logger.error(f"Error processing event stream: {e}")
         raise
@@ -119,20 +126,26 @@ if prompt:
                         f"agentId={agent_id}, agentAliasId={agent_alias_id}, sessionId={st.session_state.session_id}"
                     )
                     
-                    response = bedrock_agent_runtime.invoke_agent(
+                    response_dict = bedrock_agent_runtime.invoke_agent(
                         agentId=agent_id,
                         agentAliasId=agent_alias_id,
                         sessionId=st.session_state.session_id,
                         inputText=prompt
                     )
-
-                    # Guard against a missing 'body' key in response
-                    if 'body' not in response:
-                        logger.error("Bedrock agent response has no 'body' attribute.")
-                        output_text = "No response body returned by the agent."
+                    
+                    # Check if 'body' is present in the response
+                    if 'body' not in response_dict:
+                        logger.error(
+                            f"Bedrock agent response has no 'body' attribute. "
+                            f"Response keys: {list(response_dict.keys())}"
+                        )
+                        output_text = (
+                            "No valid event stream returned by the agent. "
+                            "Please try again or check logs."
+                        )
                     else:
-                        # Process event stream
-                        output_text, citations, trace = process_agent_response(response['body'])
+                        event_stream = response_dict['body']
+                        output_text, citations, trace = process_agent_response(event_stream)
 
                 except ClientError as e:
                     error_code = e.response['Error']['Code']
@@ -141,12 +154,6 @@ if prompt:
                     output_text = (
                         "I encountered an AWS service error. Please try again later. "
                         f"Error: {error_code}"
-                    )
-                except json.JSONDecodeError as e:
-                    logger.error(f"JSON parsing error: {e}")
-                    output_text = (
-                        "I had trouble processing the JSON response. "
-                        "Please try again."
                     )
                 except Exception as e:
                     logger.error(f"Unexpected error: {str(e)}")
@@ -161,10 +168,11 @@ if prompt:
                 # Replace placeholders %[#]% with superscript references
                 output_text = re.sub(r"%\[(\d+)\]%", r"<sup>[\1]</sup>", output_text)
                 citation_locs = ""
-                for citation in citations:
-                    for retrieved_ref in citation["retrievedReferences"]:
+                for citation_obj in citations:
+                    for retrieved_ref in citation_obj["retrievedReferences"]:
                         citation_marker = f"[{citation_num}]"
-                        match retrieved_ref['location']['type']:
+                        location_type = retrieved_ref['location']['type']
+                        match location_type:
                             case 'CONFLUENCE':
                                 citation_locs += f"\n<br>{citation_marker} {retrieved_ref['location']['confluenceLocation']['url']}"
                             case 'CUSTOM':
@@ -182,9 +190,8 @@ if prompt:
                             case 'WEB':
                                 citation_locs += f"\n<br>{citation_marker} {retrieved_ref['location']['webLocation']['url']}"
                             case _:
-                                logger.warning(f"Unknown location type: {retrieved_ref['location']['type']}")
+                                logger.warning(f"Unknown location type: {location_type}")
                         citation_num += 1
-
                 output_text += f"\n{citation_locs}"
 
             # Save the final assistant message, citations, and trace to session state
@@ -195,6 +202,7 @@ if prompt:
             # Show the assistant's message
             st.markdown(output_text, unsafe_allow_html=True)
 
+# ---------------- TRACING & CITATIONS IN SIDEBAR ----------------
 trace_types_map = {
     "Pre-Processing": ["preGuardrailTrace", "preProcessingTrace"],
     "Orchestration": ["orchestrationTrace"],
@@ -207,7 +215,6 @@ trace_info_types_map = {
     "postProcessingTrace": ["modelInvocationInput", "modelInvocationOutput", "observation"]
 }
 
-# Sidebar section for trace
 with st.sidebar:
     st.title("Trace")
 
@@ -224,19 +231,17 @@ with st.sidebar:
 
                 # Group trace events by traceId
                 for trace_event in st.session_state.trace[trace_type]:
-                    # Each event is stored under a certain traceId
                     if trace_type in trace_info_types_map:
                         # If there's known fields to look for
                         trace_info_types = trace_info_types_map[trace_type]
                         for info_type in trace_info_types:
                             if info_type in trace_event:
-                                trace_id = trace_event[info_type]["traceId"]
-                                trace_steps.setdefault(trace_id, []).append(trace_event)
+                                t_id = trace_event[info_type]["traceId"]
+                                trace_steps.setdefault(t_id, []).append(trace_event)
                                 break
                     else:
-                        # Fallback if we have no known structure
-                        trace_id = trace_event["traceId"]
-                        trace_steps.setdefault(trace_id, []).append(trace_event)
+                        t_id = trace_event["traceId"]
+                        trace_steps.setdefault(t_id, []).append(trace_event)
 
                 # Display each grouped step
                 for trace_id in trace_steps:
@@ -253,13 +258,13 @@ with st.sidebar:
     st.subheader("Citations")
     if len(st.session_state.citations) > 0:
         citation_num = 1
-        for citation in st.session_state.citations:
-            for retrieved_ref_num, retrieved_ref in enumerate(citation["retrievedReferences"]):
+        for citation_obj in st.session_state.citations:
+            for retrieved_ref_num, retrieved_ref in enumerate(citation_obj["retrievedReferences"]):
                 with st.expander(f"Citation [{citation_num}]", expanded=False):
                     citation_str = json.dumps(
                         {
-                            "generatedResponsePart": citation["generatedResponsePart"],
-                            "retrievedReference": citation["retrievedReferences"][retrieved_ref_num]
+                            "generatedResponsePart": citation_obj["generatedResponsePart"],
+                            "retrievedReference": citation_obj["retrievedReferences"][retrieved_ref_num]
                         },
                         indent=2
                     )
