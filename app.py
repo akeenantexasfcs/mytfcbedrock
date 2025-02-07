@@ -46,44 +46,6 @@ def init_session_state():
    st.session_state.citations = []
    st.session_state.trace = {}
 
-def process_agent_response(event_stream):
-   """Process the event stream from Bedrock Agent Runtime"""
-   full_response = ""
-   citations = []
-   trace = {}
-   
-   try:
-       for event in event_stream:
-           if hasattr(event, 'get'):  # Check if event is a dict-like object
-               chunk = event.get('chunk', {})
-               if chunk and hasattr(chunk.get('bytes', b''), 'decode'):
-                   chunk_data = chunk['bytes'].decode('utf-8')
-                   try:
-                       chunk_json = json.loads(chunk_data)
-                       if 'completion' in chunk_json:
-                           full_response += chunk_json['completion']
-                       if 'citations' in chunk_json:
-                           citations.extend(chunk_json['citations'])
-                       if 'trace' in chunk_json:
-                           trace.update(chunk_json['trace'])
-                   except json.JSONDecodeError as e:
-                       logger.warning(f"Failed to parse chunk as JSON: {e}")
-                       full_response += chunk_data
-           else:  # Handle the case where event might be the response itself
-               try:
-                   if hasattr(event, 'decode'):
-                       full_response += event.decode('utf-8')
-                   elif isinstance(event, str):
-                       full_response += event
-               except Exception as e:
-                   logger.warning(f"Failed to process event: {e}")
-                   
-   except Exception as e:
-       logger.error(f"Error processing event stream: {e}")
-       raise
-
-   return full_response, citations, trace
-
 # General page configuration and initialization
 st.set_page_config(page_title=ui_title, page_icon=ui_icon, layout="wide")
 st.title(ui_title)
@@ -114,7 +76,6 @@ if prompt := st.chat_input():
 
            with st.spinner():
                try:
-                   # Log the request parameters for debugging
                    logger.debug(f"Invoking agent with parameters: agentId={agent_id}, agentAliasId={agent_alias_id}")
                    
                    response = bedrock_agent_runtime.invoke_agent(
@@ -124,19 +85,26 @@ if prompt := st.chat_input():
                        inputText=prompt
                    )
                    
-                   # Process the response directly
-                   output_text, citations, trace = process_agent_response(response)
+                   logger.debug(f"Raw response type: {type(response)}")
+                   logger.debug(f"Raw response: {response}")
                    
+                   # Handle different response types
+                   if hasattr(response, 'read'):
+                       content = response.read()
+                       output_text = content.decode('utf-8') if isinstance(content, bytes) else str(content)
+                   elif isinstance(response, dict):
+                       if 'completion' in response:
+                           output_text = response['completion']
+                       else:
+                           output_text = str(response)
+                   else:
+                       output_text = str(response)
+                       
                except ClientError as e:
                    error_code = e.response['Error']['Code']
                    error_message = e.response['Error']['Message']
                    logger.error(f"AWS API Error: {error_code} - {error_message}")
                    output_text = f"I encountered an AWS service error. Please try again later. Error: {error_code}"
-               
-               except json.JSONDecodeError as e:
-                   logger.error(f"JSON parsing error: {e}")
-                   output_text = "I had trouble processing the response. Please try again."
-               
                except Exception as e:
                    logger.error(f"Unexpected error: {str(e)}")
                    output_text = "I apologize, but I encountered an unexpected error. Please try again."
