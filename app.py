@@ -35,21 +35,50 @@ def init_session_state():
 def setup_aws_credentials():
     """Set up AWS credentials from Streamlit secrets"""
     try:
-        os.environ['AWS_ACCESS_KEY_ID'] = st.secrets["aws"]["access_key_id"]
-        os.environ['AWS_SECRET_ACCESS_KEY'] = st.secrets["aws"]["secret_access_key"]
-        os.environ['AWS_DEFAULT_REGION'] = st.secrets["aws"]["region"]
-        logger.info(f"AWS credentials configured for region: {st.secrets['aws']['region']}")
+        # Create explicit credentials
+        credentials = {
+            'aws_access_key_id': st.secrets["aws"]["access_key_id"].strip(),
+            'aws_secret_access_key': st.secrets["aws"]["secret_access_key"].strip(),
+            'region_name': st.secrets["aws"]["region"].strip()
+        }
+        
+        # Log credentials format (without actual values)
+        logger.info(f"AWS Region: {credentials['region_name']}")
+        logger.info(f"Access Key ID length: {len(credentials['aws_access_key_id'])}")
+        logger.info(f"Secret Key length: {len(credentials['aws_secret_access_key'])}")
+        
+        # Set environment variables
+        os.environ['AWS_ACCESS_KEY_ID'] = credentials['aws_access_key_id']
+        os.environ['AWS_SECRET_ACCESS_KEY'] = credentials['aws_secret_access_key']
+        os.environ['AWS_DEFAULT_REGION'] = credentials['region_name']
+        
+        return credentials
     except Exception as e:
         logger.error(f"Error setting up AWS credentials: {str(e)}")
         st.error("Failed to configure AWS credentials. Please check your secrets configuration.")
-        return False
-    return True
+        return None
 
-def initialize_bedrock_client():
-    """Initialize the Bedrock client"""
+def initialize_bedrock_client(credentials):
+    """Initialize the Bedrock client with explicit credentials"""
     try:
-        client = boto3.client("bedrock-agent-runtime")
+        session = boto3.Session(
+            aws_access_key_id=credentials['aws_access_key_id'],
+            aws_secret_access_key=credentials['aws_secret_access_key'],
+            region_name=credentials['region_name']
+        )
+        
+        client = session.client('bedrock-agent-runtime')
         logger.info("Bedrock client initialized successfully")
+        
+        # Test the client with a basic operation
+        try:
+            client.list_agent_aliases(agentId=BEDROCK_AGENT_ID)
+            logger.info("Successfully tested Bedrock client connection")
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'InvalidSignatureException':
+                logger.error("Signature verification failed. Please check credentials format.")
+            raise
+            
         return client
     except Exception as e:
         logger.error(f"Error initializing Bedrock client: {str(e)}")
@@ -65,13 +94,17 @@ if len(st.session_state.items()) == 0:
     init_session_state()
 
 # Set up AWS credentials
-if not setup_aws_credentials():
+credentials = setup_aws_credentials()
+if not credentials:
     st.stop()
 
 # Initialize Bedrock client
-bedrock_client = initialize_bedrock_client()
+bedrock_client = initialize_bedrock_client(credentials)
 if not bedrock_client:
     st.stop()
+
+# Display AWS configuration status
+st.sidebar.success(f"Connected to AWS Region: {credentials['region_name']}")
 
 # Sidebar button to reset session
 with st.sidebar:
