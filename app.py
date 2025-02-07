@@ -70,19 +70,38 @@ def process_bedrock_event_stream(event_stream):
 
     try:
         for event in event_stream:
+            logger.debug(f"Processing event: {event.keys()}")
+            
+            # Handle streaming chunks
             if "chunk" in event:
                 chunk_data = event["chunk"]["bytes"].decode("utf-8")
+                logger.debug(f"Received chunk data: {chunk_data[:200]}...")  # Log first 200 chars
+                
                 try:
                     chunk_json = json.loads(chunk_data)
+                    # For web crawler agents, the response might be in different fields
                     if "completion" in chunk_json:
                         full_text += chunk_json["completion"]
+                    elif "response" in chunk_json:
+                        full_text += chunk_json["response"]
+                    elif "answer" in chunk_json:
+                        full_text += chunk_json["answer"]
+                    
+                    # Handle citations and trace data
                     if "citations" in chunk_json:
                         citations.extend(chunk_json["citations"])
                     if "trace" in chunk_json:
                         trace.update(chunk_json["trace"])
                 except json.JSONDecodeError:
-                    # If chunk isn't valid JSON, treat it as raw text
+                    # If chunk isn't valid JSON, append as raw text
                     full_text += chunk_data
+            
+            # Handle non-chunk events (like end-of-stream markers)
+            elif "continuationToken" in event:
+                logger.debug("Received continuation token")
+            elif "internalServerException" in event:
+                logger.error(f"Server exception in stream: {event['internalServerException']}")
+            
     except Exception as e:
         logger.error(f"Error processing event stream: {str(e)}")
         return f"Error processing response: {str(e)}", [], {}
@@ -94,23 +113,30 @@ def process_response(response):
     Process both streaming and non-streaming responses from Bedrock Agent Runtime.
     Returns (full_text, citations, trace).
     """
-    content_type = response.get("contentType")
+    logger.debug(f"Processing response with keys: {list(response.keys())}")
+    logger.debug(f"Response content type: {response.get('contentType')}")
     
-    # Streaming scenario
-    if content_type == "text/event-stream" and "body" in response:
+    # Handle streaming response
+    if "body" in response:
+        logger.debug("Processing streaming response")
         return process_bedrock_event_stream(response["body"])
-        
-    # Non-streaming JSON scenario
+    
+    # Handle direct completion response
     elif "completion" in response:
-        return response.get("completion", ""), response.get("citations", []), response.get("trace", {})
+        logger.debug("Processing direct completion response")
+        return response["completion"], response.get("citations", []), response.get("trace", {})
+    
+    # Handle web crawler specific response format
+    elif "answer" in response:
+        logger.debug("Processing web crawler answer response")
+        return response["answer"], response.get("citations", []), response.get("trace", {})
         
     else:
         logger.error(
-            "Bedrock agent response has unexpected format. "
-            f"Response keys: {list(response.keys())}"
+            f"Unexpected response format. Keys: {list(response.keys())}"
         )
         return (
-            "No valid response returned by the agent. Please try again.",
+            "Received unexpected response format. Please try again.",
             [],
             {}
         )
@@ -162,7 +188,12 @@ if prompt:
                         agentId=agent_id,
                         agentAliasId=agent_alias_id,
                         sessionId=st.session_state.session_id,
-                        inputText=prompt
+                        inputText=prompt,
+                        enableTrace=True,
+                        streamingConfigurations={
+                            "enableStreaming": True,
+                            "streamingStrategy": "ENABLE_ALL"
+                        }
                     )
 
                     logger.debug(f"Agent response keys: {list(response.keys())}")
