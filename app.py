@@ -9,14 +9,11 @@ import logging
 import os
 import re
 import time
-import requests
 import streamlit as st
 import uuid
 import boto3
 import botocore
 from botocore.eventstream import EventStream
-from botocore.auth import SigV4Auth
-from botocore.awsrequest import AWSRequest
 from botocore.exceptions import ClientError
 
 # Configure logging
@@ -28,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 # Bedrock Agent Configuration
 BEDROCK_AGENT_ID = "VLZFRY26GV"
-BEDROCK_AGENT_ALIAS_ID = "QT0I0B0VIG"
+BEDROCK_AGENT_ALIAS_ID = "8RQEV8A7HP"
 UI_TITLE = "SOUTHERN AG AGENT"
 
 def init_session_state():
@@ -41,8 +38,6 @@ def init_session_state():
         st.session_state.citations = []
     if "trace" not in st.session_state:
         st.session_state.trace = {}
-    if "knowledge_bases" not in st.session_state:
-        st.session_state.knowledge_bases = None
 
 # Page setup
 st.set_page_config(page_title=UI_TITLE, layout="wide")
@@ -99,97 +94,19 @@ except Exception as e:
 
 st.sidebar.success(f"Connected to AWS Region: {credentials['region_name']}")
 
-########################
-# List Knowledge Bases #
-########################
-
-def list_knowledge_bases(max_results=10, next_token=None):
-    """
-    Calls the /knowledgebases/ endpoint directly using SigV4 signing.
-    POST /knowledgebases/
-    { "maxResults": number, "nextToken": "string" }
-    """
-    region = credentials["region_name"]
-    service = "bedrock"
-    host = f"bedrock.{region}.amazonaws.com"
-    endpoint = f"https://{host}/knowledgebases/"
-
-    payload = {"maxResults": max_results}
-    if next_token:
-        payload["nextToken"] = next_token
-
-    data = json.dumps(payload)
-
-    from botocore.awsrequest import AWSRequest
-    from botocore.auth import SigV4Auth
-
-    req = AWSRequest(
-        method="POST",
-        url=endpoint,
-        data=data,
-        headers={"Content-Type": "application/json"}
-    )
-    botocore_creds = session.get_credentials()
-    req.context["client_region"] = region
-    req.context["has_streaming_input"] = False
-
-    SigV4Auth(botocore_creds, service, region).add_auth(req)
-
-    import requests
-    prepared_request = requests.Request(
-        method=req.method,
-        url=req.url,
-        headers=dict(req.headers),
-        data=req.data
-    ).prepare()
-
-    with requests.Session() as s:
-        response = s.send(prepared_request)
-
-    if debug_mode:
-        st.write("ListKnowledgeBases status code:", response.status_code)
-        try:
-            st.json(response.json())
-        except Exception as ex:
-            st.write("Could not parse JSON from response:", str(ex))
-
-    if response.status_code != 200:
-        raise Exception(f"ListKnowledgeBases failed: {response.status_code} - {response.text}")
-
-    return response.json()
-
-################
-# Sidebar Logic
-################
+# Button to reset session
 with st.sidebar:
     if st.button("Reset Session"):
         init_session_state()
-        # No st.experimental_rerun -> just stop so the script restarts on next user action
+        # We'll stop so that the next user action re-runs the script
         st.stop()
-
-    # Button to list knowledge bases
-    if st.button("List Knowledge Bases"):
-        try:
-            kb_data = list_knowledge_bases()
-            st.session_state.knowledge_bases = kb_data
-            st.success("Successfully listed knowledge bases.")
-        except Exception as e:
-            st.error(f"Could not list KBs: {str(e)}")
-
-# If we've listed knowledge bases, show them
-if st.session_state.knowledge_bases:
-    st.sidebar.write("Knowledge Bases Found:")
-    for kb in st.session_state.knowledge_bases.get("knowledgeBaseSummaries", []):
-        kb_name = kb.get("name", "UnknownName")
-        kb_id = kb.get("knowledgeBaseId", "UnknownID")
-        kb_status = kb.get("status", "N/A")
-        st.sidebar.write(f"• {kb_name} (ID={kb_id}, Status={kb_status})")
 
 #####################
 # Chat / Agent Logic
 #####################
 
 def process_event_stream(response_stream):
+    """Processes streaming responses from Bedrock agent."""
     logger.info("Processing EventStream response from Bedrock agent.")
     output_text = []
 
@@ -198,7 +115,7 @@ def process_event_stream(response_stream):
             st.write("Event received:", event)
         logger.info(f"Received event: {event}")
 
-        # Throttling check
+        # Check for immediate throttling error
         if isinstance(event, dict) and "error" in event:
             err = event["error"].get("message", "")
             if "Your request rate is too high" in err:
@@ -228,6 +145,7 @@ def process_event_stream(response_stream):
     return final_text if final_text else "No response generated"
 
 def parse_usage_info(response):
+    """Extract usage stats (e.g. tokens used) from the response if available."""
     usage_data = {}
     try:
         if isinstance(response, dict) and "modelInvocationOutput" in response:
@@ -246,17 +164,20 @@ def debug_log_dict(response_dict, message="Raw dictionary response from Bedrock:
         debug_log(f"Failed to JSON-dump the response: {str(e)}")
 
 def process_dict_response(response):
+    """Processes dictionary responses from Bedrock agent."""
     debug_log_dict(response)
 
     top_keys = list(response.keys())
     debug_log(f"Top-level keys in response: {top_keys}")
 
+    # If we have an EventStream in 'completion'
     if "completion" in response and isinstance(response["completion"], (EventStream, botocore.eventstream.EventStream)):
         debug_log("'completion' is an EventStream -> using process_event_stream()")
         return process_event_stream(response["completion"])
 
+    # Otherwise, check standard agent response
     if "modelInvocationOutput" in response:
-        debug_log("Detected 'modelInvocationOutput' key -> Attempting to parse agent response")
+        debug_log("Detected 'modelInvocationOutput' -> Attempting to parse agent response")
         agent_output = response["modelInvocationOutput"]
         raw_resp = agent_output.get("rawResponse", {})
         raw_json_str = raw_resp.get("content", "")
@@ -268,6 +189,7 @@ def process_dict_response(response):
                 parsed_json = json.loads(raw_json_str)
                 debug_log(f"Keys in parsed_json: {list(parsed_json.keys())}")
 
+                # Sometimes finalResponse is in response["observation"][-1]
                 if "observation" in response and isinstance(response["observation"], list):
                     debug_log(f"Found 'observation' array with length {len(response['observation'])}")
                     final_obs = response["observation"][-1]
@@ -277,6 +199,7 @@ def process_dict_response(response):
                             debug_log(f"Extracted finalResponse.text with length: {len(final_resp)}")
                             return final_resp
 
+                # Or parse 'content' array
                 if "content" in parsed_json and isinstance(parsed_json["content"], list):
                     text_chunks = []
                     for item in parsed_json["content"]:
@@ -291,25 +214,26 @@ def process_dict_response(response):
                 return "No response generated from Bedrock Agent."
 
             except json.JSONDecodeError as jerr:
-                debug_log(f"JSONDecodeError parsing Agent 'rawResponse': {str(jerr)}")
+                debug_log(f"JSONDecodeError parsing rawResponse: {str(jerr)}")
                 return "Error: Failed to parse the Agent rawResponse JSON."
 
+    # Or a "model" style 'completion'
     if "completion" in response:
-        debug_log("Detected top-level 'completion' key -> Attempting to parse model style response")
+        debug_log("Detected top-level 'completion' -> Attempting to parse model style")
         completion = response["completion"]
         debug_log(f"completion: {completion}")
 
         if not isinstance(completion, dict):
-            debug_log("completion is not a dict, can't parse further.")
+            debug_log("completion is not a dict.")
             return "Error: Invalid 'completion' format"
 
         if "promptOutput" in completion:
             prompt_output = completion["promptOutput"]
-            debug_log(f"Found 'promptOutput' in completion. Keys: {list(prompt_output.keys()) if isinstance(prompt_output, dict) else 'not dict'}")
+            debug_log(f"Found 'promptOutput'. Keys: {list(prompt_output.keys()) if isinstance(prompt_output, dict) else 'not dict'}")
             if isinstance(prompt_output, dict):
                 text = prompt_output.get("text", "")
                 if text:
-                    debug_log(f"Extracted text from completion.promptOutput with length: {len(text)}")
+                    debug_log(f"Extracted text from promptOutput. length: {len(text)}")
                     return text
                 else:
                     debug_log("No text in promptOutput.")
@@ -317,7 +241,7 @@ def process_dict_response(response):
         if "text" in completion:
             text_val = completion["text"]
             if text_val:
-                debug_log(f"Extracted text from completion['text'] with length: {len(text_val)}")
+                debug_log(f"Extracted text from completion['text']. length: {len(text_val)}")
                 return text_val
             else:
                 debug_log("completion['text'] is empty.")
@@ -330,7 +254,7 @@ def process_dict_response(response):
 
 def invoke_agent_with_backoff(prompt, max_retries=2, backoff_base=60):
     """
-    Attempt to call invoke_agent. If we get throttled, wait and retry up to max_retries times.
+    Attempt to call invoke_agent. If we get throttled, wait & retry up to max_retries times.
     backoff_base is in seconds, e.g. 60 for 1 minute wait.
     """
     for attempt in range(max_retries):
@@ -342,7 +266,7 @@ def invoke_agent_with_backoff(prompt, max_retries=2, backoff_base=60):
                 sessionId=st.session_state.session_id,
                 inputText=prompt,
             )
-            return response  # success, return
+            return response
         except ClientError as e:
             err_code = e.response["Error"].get("Code", "")
             err_msg = e.response["Error"].get("Message", "")
@@ -364,7 +288,7 @@ def invoke_agent_with_backoff(prompt, max_retries=2, backoff_base=60):
             raise ex
 
 #################################
-# Chat input and conversation
+# Main Chat Flow
 #################################
 prompt = st.chat_input()
 if prompt:
@@ -410,7 +334,7 @@ if prompt:
 
             st.session_state.messages.append({"role": "assistant", "content": output_text})
 
-# Finally re-render the conversation
+# Finally, re-render the conversation
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"], unsafe_allow_html=True)
