@@ -47,54 +47,51 @@ def init_session_state():
     st.session_state.citations = []
     st.session_state.trace = {}
 
-def process_agent_event_stream(event_stream):
+def process_bedrock_event_stream(event_stream):
     """
-    Process an event-stream response from Bedrock Agent Runtime.
-    Returns (output_text, citations, trace).
+    Given a botocore.eventstream.EventStream object, parse the chunks
+    and build the full completion text, citations, and trace.
+    Returns (full_text, citations, trace).
     """
-    full_response = ""
+    full_text = ""
     citations = []
     trace = {}
-    
-    try:
-        for event in event_stream:
-            # In a streaming scenario, each event has a 'chunk'
-            if 'chunk' in event:
-                chunk_data = event['chunk']['bytes'].decode('utf-8')
-                try:
-                    chunk_json = json.loads(chunk_data)
-                    if 'completion' in chunk_json:
-                        full_response += chunk_json['completion']
-                    if 'citations' in chunk_json:
-                        citations.extend(chunk_json['citations'])
-                    if 'trace' in chunk_json:
-                        trace.update(chunk_json['trace'])
-                except json.JSONDecodeError as e:
-                    logger.warning(f"Failed to parse chunk as JSON: {e}")
-                    # Fallback: just add the raw chunk if it's not valid JSON
-                    full_response += chunk_data
-    except Exception as e:
-        logger.error(f"Error processing event stream: {e}")
-        raise
 
-    return full_response, citations, trace
+    for event in event_stream:
+        if "chunk" in event:
+            chunk_data = event["chunk"]["bytes"].decode("utf-8")
+            try:
+                chunk_json = json.loads(chunk_data)
 
-def process_agent_json_response(response):
+                if "completion" in chunk_json:
+                    full_text += chunk_json["completion"]
+                if "citations" in chunk_json:
+                    citations.extend(chunk_json["citations"])
+                if "trace" in chunk_json:
+                    trace.update(chunk_json["trace"])
+
+            except json.JSONDecodeError as e:
+                # If the chunk isn't valid JSON, log a warning and append raw text
+                logger.warning(f"Chunk not valid JSON: {e}, chunk={chunk_data}")
+                full_text += chunk_data
+
+    return full_text, citations, trace
+
+def process_bedrock_json_response(response):
     """
     Process a synchronous JSON response from Bedrock Agent Runtime.
-    If present, returns (completion, citations, trace). 
-    Otherwise returns empty defaults.
+    Returns (full_text, citations, trace).
     """
-    completion = response.get('completion', '')
-    citations = response.get('citations', [])
-    trace = response.get('trace', {})
-    return completion, citations, trace
+    full_text = response.get("completion", "")
+    citations = response.get("citations", [])
+    trace = response.get("trace", {})
+    return full_text, citations, trace
 
-# Set up Streamlit page
+# General page configuration and initialization
 st.set_page_config(page_title=ui_title, page_icon=ui_icon, layout="wide")
 st.title(ui_title)
 
-# If this is a fresh session, initialize
+# Initialize session state if empty
 if len(st.session_state.items()) == 0:
     init_session_state()
 
@@ -103,11 +100,12 @@ with st.sidebar:
     if st.button("Reset Session"):
         init_session_state()
 
-# Display any existing messages
+# Display any existing messages in the conversation
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"], unsafe_allow_html=True)
 
+# Chat input that invokes the agent
 prompt = st.chat_input()
 if prompt:
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -133,22 +131,16 @@ if prompt:
                         inputText=prompt
                     )
 
-                    # Debug: see what keys we got back
+                    # Examine what we got back
                     logger.debug(f"Response keys: {list(response.keys())}")
-
-                    # Attempt to detect content type
                     content_type = response.get("contentType")
-                    
-                    # 1) If we have text/event-stream, parse from body 
+
+                    # Handle streaming vs. non-streaming
                     if content_type == "text/event-stream" and "body" in response:
-                        output_text, citations, trace = process_agent_event_stream(response["body"])
-                    
-                    # 2) If we have application/json, parse from top-level
+                        output_text, citations, trace = process_bedrock_event_stream(response["body"])
                     elif "completion" in response:
-                        output_text, citations, trace = process_agent_json_response(response)
-                    
+                        output_text, citations, trace = process_bedrock_json_response(response)
                     else:
-                        # If we get here, we don’t have 'body' or 'completion' 
                         logger.error(
                             "Bedrock agent response has no 'body' or 'completion' attribute. "
                             f"Response keys: {list(response.keys())}"
@@ -163,26 +155,24 @@ if prompt:
                     error_message = e.response['Error']['Message']
                     logger.error(f"AWS API Error: {error_code} - {error_message}")
                     output_text = (
-                        "I encountered an AWS service error. "
-                        "Please try again later. "
+                        "I encountered an AWS service error. Please try again later. "
                         f"Error: {error_code}"
                     )
                 except json.JSONDecodeError as e:
                     logger.error(f"JSON parsing error: {e}")
                     output_text = (
-                        "I had trouble processing the JSON response. "
-                        "Please try again."
+                        "I had trouble processing the JSON response. Please try again."
                     )
                 except Exception as e:
                     logger.error(f"Unexpected error: {str(e)}")
                     output_text = (
-                        "I apologize, but I encountered an unexpected error. "
-                        "Please try again."
+                        "I apologize, but I encountered an unexpected error. Please try again."
                     )
 
-            # Insert citations if present
+            # Add citations if available
             if citations:
                 citation_num = 1
+                # Convert placeholders %[#]% to superscript references
                 output_text = re.sub(r"%\[(\d+)\]%", r"<sup>[\1]</sup>", output_text)
                 citation_locs = ""
                 for citation_item in citations:
@@ -210,7 +200,7 @@ if prompt:
                         citation_num += 1
                 output_text += f"\n{citation_locs}"
 
-            # Save the message, citations, and trace
+            # Store output in session
             st.session_state.messages.append({"role": "assistant", "content": output_text})
             st.session_state.citations = citations
             st.session_state.trace = trace
@@ -218,7 +208,6 @@ if prompt:
             # Display assistant response
             st.markdown(output_text, unsafe_allow_html=True)
 
-# Trace expansions in sidebar
 trace_types_map = {
     "Pre-Processing": ["preGuardrailTrace", "preProcessingTrace"],
     "Orchestration": ["orchestrationTrace"],
@@ -231,6 +220,7 @@ trace_info_types_map = {
     "postProcessingTrace": ["modelInvocationInput", "modelInvocationOutput", "observation"]
 }
 
+# Sidebar Trace Section
 with st.sidebar:
     st.title("Trace")
 
@@ -244,8 +234,8 @@ with st.sidebar:
                 has_trace = True
                 trace_steps = {}
 
+                # Group traces by traceId
                 for trace_event in st.session_state.trace[trace_type]:
-                    # Attempt to group by traceId
                     if trace_type in trace_info_types_map:
                         for info_type in trace_info_types_map[trace_type]:
                             if info_type in trace_event:
@@ -253,9 +243,11 @@ with st.sidebar:
                                 trace_steps.setdefault(trace_id, []).append(trace_event)
                                 break
                     else:
-                        trace_id = trace_event["traceId"]
+                        # Fallback if no known structure
+                        trace_id = trace_event.get("traceId", f"no-id-{step_num}")
                         trace_steps.setdefault(trace_id, []).append(trace_event)
 
+                # Display each grouped step
                 for trace_id in trace_steps:
                     with st.expander(f"Trace Step {step_num}", expanded=False):
                         for entry in trace_steps[trace_id]:
@@ -265,7 +257,7 @@ with st.sidebar:
         if not has_trace:
             st.text("None")
 
-    # Show citations
+    # Citations Section
     st.subheader("Citations")
     if len(st.session_state.citations) > 0:
         citation_num = 1
