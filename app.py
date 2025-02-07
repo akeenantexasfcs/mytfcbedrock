@@ -11,6 +11,8 @@ import re
 import streamlit as st
 import uuid
 import boto3
+import botocore
+from botocore.eventstream import EventStream
 from botocore.exceptions import ClientError
 
 # Configure logging
@@ -164,23 +166,27 @@ if prompt := st.chat_input():
                         inputText=prompt
                     )
                     
-                    logger.info("Response type: " + str(type(response)))
+                    logger.info(f"Response type: {type(response)}")
                     debug_log("Received response from agent")
                     
-                    # Process the response stream
-                    full_response = []
-                    for event in response['completion']['promptOutput']['text']:
-                        if debug_mode:
-                            st.write(f"Processing event: {event}")
-                        full_response.append(event)
+                    # Handle EventStream response
+                    if isinstance(response, botocore.eventstream.EventStream):
+                        full_response = []
+                        for event in response:
+                            logger.info(f"Received event: {event}")
+                            if "chunk" in event:
+                                chunk_text = event["chunk"].get("bytes", "").decode("utf-8")
+                                full_response.append(chunk_text)
+                        
+                        output_text = "".join(full_response)
+                    else:
+                        logger.error("Unexpected response format from Bedrock.")
+                        output_text = "Error: Unexpected response format from Bedrock."
                     
-                    # Combine the response parts
-                    output_text = ''.join(full_response)
                     if not output_text:
                         output_text = "No response generated"
-                        
-                    citations = response.get('citations', [])
-                    trace = response.get('trace', {})
+
+                    # No need to process citations and trace as they're not part of the stream
                     
                     logger.info(f"Extracted output text: {output_text}")
                     logger.info(f"Citations found: {len(citations)}")
