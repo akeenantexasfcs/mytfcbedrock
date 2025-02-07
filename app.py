@@ -15,7 +15,9 @@ import uuid
 import yaml
 from botocore.exceptions import ClientError
 
-# Configure logging using YAML
+# -----------------------------------------------------------------------------
+# Logging Configuration
+# -----------------------------------------------------------------------------
 if os.path.exists("logging.yaml"):
     with open("logging.yaml", "r") as file:
         config = yaml.safe_load(file)
@@ -26,20 +28,27 @@ else:
 
 logger = logging.getLogger(__name__)
 
-# Get config from Streamlit secrets
+# -----------------------------------------------------------------------------
+# Secrets / Configuration
+# -----------------------------------------------------------------------------
 agent_id = st.secrets["BEDROCK_AGENT_ID"]
 agent_alias_id = st.secrets["BEDROCK_AGENT_ALIAS_ID"]
 ui_title = st.secrets["BEDROCK_AGENT_TEST_UI_TITLE"]
 ui_icon = st.secrets["BEDROCK_AGENT_TEST_UI_ICON"]
 
-# Initialize the Bedrock Runtime client
+# -----------------------------------------------------------------------------
+# Boto3 Client for Bedrock
+# -----------------------------------------------------------------------------
 bedrock_agent_runtime = boto3.client(
-    service_name='bedrock-agent-runtime',
+    service_name="bedrock-agent-runtime",
     aws_access_key_id=st.secrets["AWS_ACCESS_KEY_ID"],
     aws_secret_access_key=st.secrets["AWS_SECRET_ACCESS_KEY"],
     region_name=st.secrets["AWS_DEFAULT_REGION"]
 )
 
+# -----------------------------------------------------------------------------
+# Session State Initialization
+# -----------------------------------------------------------------------------
 def init_session_state():
     """Initialize Streamlit session state variables."""
     st.session_state.session_id = str(uuid.uuid4())
@@ -47,6 +56,9 @@ def init_session_state():
     st.session_state.citations = []
     st.session_state.trace = {}
 
+# -----------------------------------------------------------------------------
+# Helpers: Process Event Stream and JSON Responses
+# -----------------------------------------------------------------------------
 def process_bedrock_event_stream(event_stream):
     """
     Given a botocore.eventstream.EventStream object, parse the chunks
@@ -62,17 +74,17 @@ def process_bedrock_event_stream(event_stream):
             chunk_data = event["chunk"]["bytes"].decode("utf-8")
             try:
                 chunk_json = json.loads(chunk_data)
-
+                # If partial or full text is in "completion"
                 if "completion" in chunk_json:
                     full_text += chunk_json["completion"]
+                # Merge any citations
                 if "citations" in chunk_json:
                     citations.extend(chunk_json["citations"])
+                # Merge trace info
                 if "trace" in chunk_json:
                     trace.update(chunk_json["trace"])
-
             except json.JSONDecodeError as e:
-                # If the chunk isn't valid JSON, log a warning and append raw text
-                logger.warning(f"Chunk not valid JSON: {e}, chunk={chunk_data}")
+                logger.warning(f"Chunk not valid JSON: {e}\nRaw chunk: {chunk_data}")
                 full_text += chunk_data
 
     return full_text, citations, trace
@@ -87,31 +99,39 @@ def process_bedrock_json_response(response):
     trace = response.get("trace", {})
     return full_text, citations, trace
 
-# General page configuration and initialization
+# -----------------------------------------------------------------------------
+# Streamlit App: Page / Layout Config
+# -----------------------------------------------------------------------------
 st.set_page_config(page_title=ui_title, page_icon=ui_icon, layout="wide")
 st.title(ui_title)
 
-# Initialize session state if empty
+# If we have a new session, initialize
 if len(st.session_state.items()) == 0:
     init_session_state()
 
-# Sidebar button to reset session
+# Reset Session in sidebar
 with st.sidebar:
     if st.button("Reset Session"):
         init_session_state()
 
-# Display any existing messages in the conversation
+# -----------------------------------------------------------------------------
+# Display Existing Messages
+# -----------------------------------------------------------------------------
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"], unsafe_allow_html=True)
 
-# Chat input that invokes the agent
+# -----------------------------------------------------------------------------
+# Chat Input & Invoke Agent
+# -----------------------------------------------------------------------------
 prompt = st.chat_input()
 if prompt:
+    # 1) User sends message
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.write(prompt)
 
+    # 2) Prepare container for assistant response
     with st.chat_message("assistant"):
         with st.empty():
             output_text = ""
@@ -119,10 +139,12 @@ if prompt:
             trace = {}
 
             with st.spinner("Processing..."):
+                # Invoke the agent
                 try:
                     logger.debug(
-                        f"Invoking agent with parameters: agentId={agent_id}, "
-                        f"agentAliasId={agent_alias_id}, sessionId={st.session_state.session_id}"
+                        f"Invoking agent with agentId={agent_id}, "
+                        f"agentAliasId={agent_alias_id}, "
+                        f"sessionId={st.session_state.session_id}"
                     )
                     response = bedrock_agent_runtime.invoke_agent(
                         agentId=agent_id,
@@ -131,45 +153,50 @@ if prompt:
                         inputText=prompt
                     )
 
-                    # Examine what we got back
-                    logger.debug(f"Response keys: {list(response.keys())}")
+                    logger.debug(f"Agent response keys: {list(response.keys())}")
                     content_type = response.get("contentType")
 
-                    # Handle streaming vs. non-streaming
+                    # Streaming scenario
                     if content_type == "text/event-stream" and "body" in response:
                         output_text, citations, trace = process_bedrock_event_stream(response["body"])
+
+                    # Non-streaming JSON scenario
                     elif "completion" in response:
                         output_text, citations, trace = process_bedrock_json_response(response)
+
                     else:
+                        # Fallback: no recognized streaming body or completion
                         logger.error(
-                            "Bedrock agent response has no 'body' or 'completion' attribute. "
+                            "Bedrock agent response has no 'body' or 'completion'. "
                             f"Response keys: {list(response.keys())}"
                         )
                         output_text = (
                             "No valid event stream or completion returned by the agent. "
-                            "Please try again or check logs."
+                            "Please check logs or try again."
                         )
 
                 except ClientError as e:
-                    error_code = e.response['Error']['Code']
-                    error_message = e.response['Error']['Message']
+                    error_code = e.response["Error"]["Code"]
+                    error_message = e.response["Error"]["Message"]
                     logger.error(f"AWS API Error: {error_code} - {error_message}")
                     output_text = (
                         "I encountered an AWS service error. Please try again later. "
                         f"Error: {error_code}"
                     )
+
                 except json.JSONDecodeError as e:
                     logger.error(f"JSON parsing error: {e}")
                     output_text = (
                         "I had trouble processing the JSON response. Please try again."
                     )
+
                 except Exception as e:
                     logger.error(f"Unexpected error: {str(e)}")
                     output_text = (
-                        "I apologize, but I encountered an unexpected error. Please try again."
+                        "I encountered an unexpected error. Please try again."
                     )
 
-            # Add citations if available
+            # 3) Add citations to the output text
             if citations:
                 citation_num = 1
                 # Convert placeholders %[#]% to superscript references
@@ -178,36 +205,41 @@ if prompt:
                 for citation_item in citations:
                     for retrieved_ref in citation_item.get("retrievedReferences", []):
                         citation_marker = f"[{citation_num}]"
-                        match retrieved_ref['location']['type']:
-                            case 'CONFLUENCE':
+                        match retrieved_ref["location"]["type"]:
+                            case "CONFLUENCE":
                                 citation_locs += f"\n<br>{citation_marker} {retrieved_ref['location']['confluenceLocation']['url']}"
-                            case 'CUSTOM':
+                            case "CUSTOM":
                                 citation_locs += f"\n<br>{citation_marker} {retrieved_ref['location']['customDocumentLocation']['id']}"
-                            case 'KENDRA':
+                            case "KENDRA":
                                 citation_locs += f"\n<br>{citation_marker} {retrieved_ref['location']['kendraDocumentLocation']['uri']}"
-                            case 'S3':
+                            case "S3":
                                 citation_locs += f"\n<br>{citation_marker} {retrieved_ref['location']['s3Location']['uri']}"
-                            case 'SALESFORCE':
+                            case "SALESFORCE":
                                 citation_locs += f"\n<br>{citation_marker} {retrieved_ref['location']['salesforceLocation']['url']}"
-                            case 'SHAREPOINT':
+                            case "SHAREPOINT":
                                 citation_locs += f"\n<br>{citation_marker} {retrieved_ref['location']['sharePointLocation']['url']}"
-                            case 'SQL':
+                            case "SQL":
                                 citation_locs += f"\n<br>{citation_marker} {retrieved_ref['location']['sqlLocation']['query']}"
-                            case 'WEB':
+                            case "WEB":
                                 citation_locs += f"\n<br>{citation_marker} {retrieved_ref['location']['webLocation']['url']}"
                             case _:
-                                logger.warning(f"Unknown location type: {retrieved_ref['location']['type']}")
+                                logger.warning(
+                                    f"Unknown location type: {retrieved_ref['location']['type']}"
+                                )
                         citation_num += 1
                 output_text += f"\n{citation_locs}"
 
-            # Store output in session
+            # 4) Update session state with the assistant's response
             st.session_state.messages.append({"role": "assistant", "content": output_text})
             st.session_state.citations = citations
             st.session_state.trace = trace
 
-            # Display assistant response
+            # 5) Display the assistant's response
             st.markdown(output_text, unsafe_allow_html=True)
 
+# -----------------------------------------------------------------------------
+# Sidebar: Trace & Citations
+# -----------------------------------------------------------------------------
 trace_types_map = {
     "Pre-Processing": ["preGuardrailTrace", "preProcessingTrace"],
     "Orchestration": ["orchestrationTrace"],
@@ -220,7 +252,6 @@ trace_info_types_map = {
     "postProcessingTrace": ["modelInvocationInput", "modelInvocationOutput", "observation"]
 }
 
-# Sidebar Trace Section
 with st.sidebar:
     st.title("Trace")
 
@@ -234,7 +265,7 @@ with st.sidebar:
                 has_trace = True
                 trace_steps = {}
 
-                # Group traces by traceId
+                # Group trace events by traceId
                 for trace_event in st.session_state.trace[trace_type]:
                     if trace_type in trace_info_types_map:
                         for info_type in trace_info_types_map[trace_type]:
@@ -243,8 +274,7 @@ with st.sidebar:
                                 trace_steps.setdefault(trace_id, []).append(trace_event)
                                 break
                     else:
-                        # Fallback if no known structure
-                        trace_id = trace_event.get("traceId", f"no-id-{step_num}")
+                        trace_id = trace_event.get("traceId", f"unknown_id_{step_num}")
                         trace_steps.setdefault(trace_id, []).append(trace_event)
 
                 # Display each grouped step
@@ -257,9 +287,9 @@ with st.sidebar:
         if not has_trace:
             st.text("None")
 
-    # Citations Section
+    # Citations
     st.subheader("Citations")
-    if len(st.session_state.citations) > 0:
+    if st.session_state.citations:
         citation_num = 1
         for citation_item in st.session_state.citations:
             for retrieved_ref_num, retrieved_ref in enumerate(citation_item.get("retrievedReferences", [])):
