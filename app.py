@@ -54,19 +54,30 @@ def process_agent_response(event_stream):
    
    try:
        for event in event_stream:
-           if 'chunk' in event:
-               chunk_data = event['chunk']['bytes'].decode('utf-8')
+           if hasattr(event, 'get'):  # Check if event is a dict-like object
+               chunk = event.get('chunk', {})
+               if chunk and hasattr(chunk.get('bytes', b''), 'decode'):
+                   chunk_data = chunk['bytes'].decode('utf-8')
+                   try:
+                       chunk_json = json.loads(chunk_data)
+                       if 'completion' in chunk_json:
+                           full_response += chunk_json['completion']
+                       if 'citations' in chunk_json:
+                           citations.extend(chunk_json['citations'])
+                       if 'trace' in chunk_json:
+                           trace.update(chunk_json['trace'])
+                   except json.JSONDecodeError as e:
+                       logger.warning(f"Failed to parse chunk as JSON: {e}")
+                       full_response += chunk_data
+           else:  # Handle the case where event might be the response itself
                try:
-                   chunk_json = json.loads(chunk_data)
-                   if 'completion' in chunk_json:
-                       full_response += chunk_json['completion']
-                   if 'citations' in chunk_json:
-                       citations.extend(chunk_json['citations'])
-                   if 'trace' in chunk_json:
-                       trace.update(chunk_json['trace'])
-               except json.JSONDecodeError as e:
-                   logger.warning(f"Failed to parse chunk as JSON: {e}")
-                   full_response += chunk_data
+                   if hasattr(event, 'decode'):
+                       full_response += event.decode('utf-8')
+                   elif isinstance(event, str):
+                       full_response += event
+               except Exception as e:
+                   logger.warning(f"Failed to process event: {e}")
+                   
    except Exception as e:
        logger.error(f"Error processing event stream: {e}")
        raise
@@ -113,7 +124,8 @@ if prompt := st.chat_input():
                        inputText=prompt
                    )
                    
-                   output_text, citations, trace = process_agent_response(response['body'])
+                   # Process the response directly
+                   output_text, citations, trace = process_agent_response(response)
                    
                except ClientError as e:
                    error_code = e.response['Error']['Code']
