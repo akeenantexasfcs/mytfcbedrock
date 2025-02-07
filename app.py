@@ -185,29 +185,68 @@ if prompt := st.chat_input():
                         inputText=prompt
                     )
                     
-                    # Log response type
-                    response_type = type(response)
-                    logger.info(f"Response type: {response_type}")
-                    if debug_mode:
-                        st.write(f"Response type: {response_type}")
+                    # Initialize default values
+                    output_text = "No response generated"
+                    citations = []
+                    trace = {}
                     
-                    # Process response based on its type
-                    if isinstance(response, (botocore.eventstream.EventStream, EventStream)):
-                        logger.info("Processing EventStream response")
-                        output_text = process_event_stream(response)
-                    elif isinstance(response, dict):
-                        logger.info("Processing dictionary response")
-                        output_text = process_dict_response(response)
+                    # Log response type
+                    logger.info(f"Response type: {type(response)}")
+                    if debug_mode:
+                        st.write(f"Response type: {type(response)}")
+                    
+                    # Case 1: Dictionary response
+                    if isinstance(response, dict):
+                        logger.info("Processing JSON response from Bedrock agent.")
+                        if debug_mode:
+                            st.write("Response keys:", response.keys())
+                        output_text = response.get("completion", {}).get("promptOutput", {}).get("text", "No response generated")
+                        citations = response.get("citations", [])
+                        trace = response.get("trace", {})
+                    
+                    # Case 2: EventStream response
+                    elif isinstance(response, (botocore.eventstream.EventStream, EventStream)):
+                        logger.info("Processing EventStream response from Bedrock agent.")
+                        chunks = []
+                        for event in response:
+                            if debug_mode:
+                                st.write("Event received:", event)
+                            logger.info(f"Received event: {event}")
+                            try:
+                                if hasattr(event, 'chunk'):
+                                    chunk = event.chunk
+                                    if hasattr(chunk, 'bytes'):
+                                        text = chunk.bytes.decode('utf-8')
+                                        chunks.append(text)
+                                elif isinstance(event, dict) and "chunk" in event:
+                                    chunk_text = event["chunk"].get("bytes", b"").decode("utf-8")
+                                    chunks.append(chunk_text)
+                            except Exception as chunk_error:
+                                logger.error(f"Error processing chunk: {str(chunk_error)}")
+                                continue
+                        
+                        output_text = "".join(chunks)
+                        if debug_mode:
+                            st.write(f"Assembled text length: {len(output_text)}")
+                    
                     else:
-                        logger.error(f"Unknown response type: {response_type}")
-                        output_text = f"Error: Unknown response type {response_type}"
+                        logger.error(f"Unexpected response type: {type(response)}")
+                        output_text = "Error: Unexpected response format from Bedrock."
                     
                     if not output_text:
                         output_text = "No response generated"
                     
-                    logger.info(f"Final output text length: {len(output_text)}")
+                    logger.info(f"Extracted output text: {output_text}")
+                    logger.info(f"Citations found: {len(citations)}")
+                    logger.info(f"Trace data present: {'Yes' if trace else 'No'}")
+                    
                     if debug_mode:
-                        st.json({"Output Length": len(output_text)})
+                        st.json({
+                            "Response Type": str(type(response)),
+                            "Output Length": len(output_text),
+                            "Citations Count": len(citations),
+                            "Has Trace": bool(trace)
+                        })
 
             except ClientError as e:
                 error_code = e.response["Error"]["Code"]
