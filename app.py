@@ -9,7 +9,6 @@ import logging
 import logging.config
 import os
 import re
-from services import bedrock_agent_runtime
 import streamlit as st
 import uuid
 import yaml
@@ -28,6 +27,9 @@ UI_TITLE = "SOUTHERN AG AGENT"
 os.environ['AWS_ACCESS_KEY_ID'] = st.secrets["aws"]["access_key_id"]
 os.environ['AWS_SECRET_ACCESS_KEY'] = st.secrets["aws"]["secret_access_key"]
 os.environ['AWS_DEFAULT_REGION'] = st.secrets["aws"]["region"]
+
+# Initialize the Bedrock Agent Runtime client
+bedrock_client = boto3.client("bedrock-agent-runtime")
 
 def init_session_state():
     st.session_state.session_id = str(uuid.uuid4())
@@ -60,13 +62,24 @@ if prompt := st.chat_input():
     with st.chat_message("assistant"):
         with st.empty():
             with st.spinner():
-                response = bedrock_agent_runtime.invoke_agent(
-                    BEDROCK_AGENT_ID,
-                    BEDROCK_AGENT_ALIAS_ID,
-                    st.session_state.session_id,
-                    prompt
-                )
-            output_text = response["output_text"]
+                try:
+                    response = bedrock_client.invoke_agent(
+                        agentId=BEDROCK_AGENT_ID,
+                        agentAliasId=BEDROCK_AGENT_ALIAS_ID,
+                        sessionId=st.session_state.session_id,
+                        inputText=prompt
+                    )
+                    
+                    completion = response.get('completion', {})
+                    output_text = completion.get('promptOutput', {}).get('text', '')
+                    citations = completion.get('citations', [])
+                    trace = completion.get('trace', {})
+                    
+                except Exception as e:
+                    st.error(f"Error invoking Bedrock agent: {str(e)}")
+                    output_text = "Sorry, there was an error processing your request."
+                    citations = []
+                    trace = {}
 
             # Check if the output is a JSON object with the instruction and result fields
             try:
@@ -77,11 +90,11 @@ if prompt := st.chat_input():
                 pass
 
             # Add citations
-            if len(response["citations"]) > 0:
+            if len(citations) > 0:
                 citation_num = 1
                 output_text = re.sub(r"%\[(\d+)\]%", r"<sup>[\1]</sup>", output_text)
                 citation_locs = ""
-                for citation in response["citations"]:
+                for citation in citations:
                     for retrieved_ref in citation["retrievedReferences"]:
                         citation_marker = f"[{citation_num}]"
                         match retrieved_ref['location']['type']:
@@ -107,8 +120,8 @@ if prompt := st.chat_input():
                 output_text += f"\n{citation_locs}"
 
             st.session_state.messages.append({"role": "assistant", "content": output_text})
-            st.session_state.citations = response["citations"]
-            st.session_state.trace = response["trace"]
+            st.session_state.citations = citations
+            st.session_state.trace = trace
             st.markdown(output_text, unsafe_allow_html=True)
 
 # Trace configuration
