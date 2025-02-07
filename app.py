@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import time
 import streamlit as st
 import uuid
 import boto3
@@ -93,7 +94,10 @@ with st.sidebar:
         init_session_state()
 
 def process_event_stream(response_stream):
-    """Processes streaming responses from Bedrock."""
+    """
+    Processes streaming responses from Bedrock.
+    If a chunk indicates throttling, we'll raise an exception so the retry logic can catch it.
+    """
     logger.info("Processing EventStream response from Bedrock agent.")
     output_text = []
 
@@ -101,6 +105,22 @@ def process_event_stream(response_stream):
         if debug_mode:
             st.write("Event received:", event)
         logger.info(f"Received event: {event}")
+
+        # If there's an immediate error chunk with "Your request rate is too high",
+        # We can handle that. Usually these come as an 'error' chunk, but can vary by model.
+        if isinstance(event, dict) and "error" in event:
+            err = event["error"].get("message", "")
+            if "Your request rate is too high" in err:
+                logger.error("Throttling encountered in event stream chunk.")
+                raise ClientError(
+                    {
+                        "Error": {
+                            "Code": "ThrottlingException",
+                            "Message": "Your request rate is too high (event-stream)."
+                        }
+                    },
+                    operation_name="invoke_agent"
+                )
 
         try:
             if isinstance(event, dict) and "chunk" in event:
@@ -119,15 +139,12 @@ def process_event_stream(response_stream):
 def parse_usage_info(response):
     """
     Try to extract usage stats (e.g., tokens used) from the response.
-    For many models, this is found in:
-      response["modelInvocationOutput"]["metadata"]["usage"]
-    But it can vary by model or agent. We return a dict either way.
+    For many models, usage is found in response["modelInvocationOutput"]["metadata"]["usage"].
     """
     usage_data = {}
     try:
         if isinstance(response, dict) and "modelInvocationOutput" in response:
             model_inv_output = response["modelInvocationOutput"]
-            # Example path: response["modelInvocationOutput"]["metadata"]["usage"]
             metadata = model_inv_output.get("metadata", {})
             usage_data = metadata.get("usage", {})
     except Exception as e:
@@ -170,6 +187,7 @@ def process_dict_response(response):
                 parsed_json = json.loads(raw_json_str)
                 debug_log(f"Keys in parsed_json: {list(parsed_json.keys())}")
 
+                # sometimes finalResponse is in response["observation"][-1]
                 if "observation" in response and isinstance(response["observation"], list):
                     debug_log(f"Found 'observation' array with length {len(response['observation'])}")
                     final_obs = response["observation"][-1]
@@ -179,7 +197,7 @@ def process_dict_response(response):
                             debug_log(f"Extracted finalResponse.text with length: {len(final_resp)}")
                             return final_resp
 
-                # Otherwise parse 'content' array in the parsed_json
+                # otherwise parse 'content' array
                 if "content" in parsed_json and isinstance(parsed_json["content"], list):
                     text_chunks = []
                     for item in parsed_json["content"]:
@@ -234,41 +252,65 @@ def process_dict_response(response):
     debug_log("No recognized response format found. Returning error.")
     return "Error: Invalid response format"
 
-# ----- MAIN CHAT LOGIC -----
+# Single function to make the Bedrock call with backoff
+def invoke_agent_with_backoff(prompt, max_retries=2, backoff_base=60):
+    """
+    Attempt to call invoke_agent. If we get throttled, wait and retry up to max_retries times.
+    backoff_base is in seconds, e.g. 60 for 1 minute wait.
+    """
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Invoking Bedrock agent (attempt {attempt+1} of {max_retries}) with prompt: {prompt}")
+            response = bedrock_client.invoke_agent(
+                agentId=BEDROCK_AGENT_ID,
+                agentAliasId=BEDROCK_AGENT_ALIAS_ID,
+                sessionId=st.session_state.session_id,
+                inputText=prompt,
+            )
+            return response  # success, return
+        except ClientError as e:
+            err_code = e.response["Error"].get("Code", "")
+            err_msg = e.response["Error"].get("Message", "")
+            logger.error(f"AWS Error: {err_code} - {err_msg}")
+
+            if err_code in ["ThrottlingException", "TooManyRequestsException"]:
+                if attempt < (max_retries - 1):
+                    wait_time = backoff_base * (2 ** attempt)
+                    st.warning(f"Throttling encountered. Waiting {wait_time}s before retry...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    st.error("Max retries reached. Still throttled. Please wait or reduce request rate.")
+                    raise e  # re-raise so we display an error
+            else:
+                # Not a throttling exception, just re-raise
+                raise e
+        except Exception as ex:
+            logger.error(f"Unexpected error: {str(ex)}", exc_info=True)
+            raise ex
 
 prompt = st.chat_input()
 if prompt:
-    # Store the user prompt
     st.session_state.messages.append({"role": "user", "content": prompt})
-
-    # We create a chat_message block for the user (for immediate display)
     with st.chat_message("user"):
         st.write(prompt)
 
-    # Provide a placeholder for assistant while we process
     with st.chat_message("assistant"):
         with st.spinner("Processing your request..."):
+            output_text = "No response generated"
+
             try:
-                logger.info(f"Invoking Bedrock agent with prompt: {prompt}")
-                debug_log("Starting agent invocation...")
-
-                logger.info(f"Agent ID: {BEDROCK_AGENT_ID}")
-                logger.info(f"Agent Alias ID: {BEDROCK_AGENT_ALIAS_ID}")
-                logger.info(f"Session ID: {st.session_state.session_id}")
-
-                response = bedrock_client.invoke_agent(
-                    agentId=BEDROCK_AGENT_ID,
-                    agentAliasId=BEDROCK_AGENT_ALIAS_ID,
-                    sessionId=st.session_state.session_id,
-                    inputText=prompt,
-                )
+                debug_log("Starting agent invocation with backoff.")
+                # Single invocation with combined knowledge bases (if your agent is attached to them)
+                response = invoke_agent_with_backoff(prompt)
 
                 # parse the text from the response
-                output_text = "No response generated"
                 if isinstance(response, (botocore.eventstream.EventStream, EventStream)):
+                    # event stream response
                     logger.info("Processing EventStream response from Bedrock agent.")
                     output_text = process_event_stream(response)
                 elif isinstance(response, dict):
+                    # dictionary response
                     logger.info("Processing dictionary response from Bedrock agent.")
                     output_text = process_dict_response(response)
                 else:
@@ -278,31 +320,27 @@ if prompt:
                 if not output_text:
                     output_text = "No response generated"
 
-                # Also parse usage info
+                # Also parse usage info for debugging
                 usage_info = parse_usage_info(response)
                 logger.info(f"Usage info from Bedrock: {usage_info}")
 
-                # Show usage info in debug mode
                 if debug_mode and usage_info:
                     st.write("**Usage Info**")
                     st.json(usage_info)
 
             except ClientError as e:
-                error_code = e.response["Error"]["Code"]
-                error_message = e.response["Error"]["Message"]
-                logger.error(f"AWS Error: {error_code} - {error_message}")
-                st.error(f"AWS Error: {error_message}")
+                # We handle any leftover client errors
+                logger.error(f"ClientError after attempts: {str(e)}", exc_info=True)
+                st.error(f"AWS Error: {e.response['Error']['Message']}")
                 output_text = "Sorry, there was an error processing your request."
-
             except Exception as e:
                 logger.error(f"Unexpected error: {str(e)}", exc_info=True)
                 st.error(f"An unexpected error occurred: {str(e)}")
                 output_text = "Sorry, there was an error processing your request."
 
-            # Now store the assistant's reply in session state
             st.session_state.messages.append({"role": "assistant", "content": output_text})
 
-# Re-render the entire conversation so the newest messages appear exactly once
+# Finally re-render the conversation
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"], unsafe_allow_html=True)
