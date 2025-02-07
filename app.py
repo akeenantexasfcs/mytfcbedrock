@@ -6,16 +6,18 @@
 
 import json
 import logging
-import logging.config
 import os
 import re
 import streamlit as st
 import uuid
-import yaml
 import boto3
+from botocore.exceptions import ClientError
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Bedrock Agent Configuration
@@ -23,46 +25,77 @@ BEDROCK_AGENT_ID = "VLZFRY26GV"
 BEDROCK_AGENT_ALIAS_ID = "QT0I0B0VIG"
 UI_TITLE = "SOUTHERN AG AGENT"
 
-# AWS Configuration from Streamlit secrets
-os.environ['AWS_ACCESS_KEY_ID'] = st.secrets["aws"]["access_key_id"]
-os.environ['AWS_SECRET_ACCESS_KEY'] = st.secrets["aws"]["secret_access_key"]
-os.environ['AWS_DEFAULT_REGION'] = st.secrets["aws"]["region"]
-
-# Initialize the Bedrock Agent Runtime client
-bedrock_client = boto3.client("bedrock-agent-runtime")
-
 def init_session_state():
+    """Initialize or reset the session state"""
     st.session_state.session_id = str(uuid.uuid4())
     st.session_state.messages = []
     st.session_state.citations = []
     st.session_state.trace = {}
 
-# General page configuration and initialization
+def setup_aws_credentials():
+    """Set up AWS credentials from Streamlit secrets"""
+    try:
+        os.environ['AWS_ACCESS_KEY_ID'] = st.secrets["aws"]["access_key_id"]
+        os.environ['AWS_SECRET_ACCESS_KEY'] = st.secrets["aws"]["secret_access_key"]
+        os.environ['AWS_DEFAULT_REGION'] = st.secrets["aws"]["region"]
+        logger.info(f"AWS credentials configured for region: {st.secrets['aws']['region']}")
+    except Exception as e:
+        logger.error(f"Error setting up AWS credentials: {str(e)}")
+        st.error("Failed to configure AWS credentials. Please check your secrets configuration.")
+        return False
+    return True
+
+def initialize_bedrock_client():
+    """Initialize the Bedrock client"""
+    try:
+        client = boto3.client("bedrock-agent-runtime")
+        logger.info("Bedrock client initialized successfully")
+        return client
+    except Exception as e:
+        logger.error(f"Error initializing Bedrock client: {str(e)}")
+        st.error("Failed to initialize Bedrock client. Please check your AWS configuration.")
+        return None
+
+# Page setup
 st.set_page_config(page_title=UI_TITLE, layout="wide")
 st.title(UI_TITLE)
+
+# Initialize session state if needed
 if len(st.session_state.items()) == 0:
     init_session_state()
 
-# Sidebar button to reset session state
+# Set up AWS credentials
+if not setup_aws_credentials():
+    st.stop()
+
+# Initialize Bedrock client
+bedrock_client = initialize_bedrock_client()
+if not bedrock_client:
+    st.stop()
+
+# Sidebar button to reset session
 with st.sidebar:
     if st.button("Reset Session"):
         init_session_state()
 
-# Messages in the conversation
+# Display conversation history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"], unsafe_allow_html=True)
 
-# Chat input that invokes the agent
+# Chat input and response handling
 if prompt := st.chat_input():
+    # Display user message
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.write(prompt)
 
+    # Handle assistant response
     with st.chat_message("assistant"):
         with st.empty():
-            with st.spinner():
-                try:
+            try:
+                logger.info(f"Invoking Bedrock agent with prompt: {prompt}")
+                with st.spinner("Processing your request..."):
                     response = bedrock_client.invoke_agent(
                         agentId=BEDROCK_AGENT_ID,
                         agentAliasId=BEDROCK_AGENT_ALIAS_ID,
@@ -70,55 +103,78 @@ if prompt := st.chat_input():
                         inputText=prompt
                     )
                     
+                    # Extract response components
                     completion = response.get('completion', {})
                     output_text = completion.get('promptOutput', {}).get('text', '')
                     citations = completion.get('citations', [])
                     trace = completion.get('trace', {})
                     
-                except Exception as e:
-                    st.error(f"Error invoking Bedrock agent: {str(e)}")
-                    output_text = "Sorry, there was an error processing your request."
-                    citations = []
-                    trace = {}
+                    logger.info("Successfully received response from Bedrock agent")
 
-            # Check if the output is a JSON object with the instruction and result fields
-            try:
-                output_json = json.loads(output_text, strict=False)
-                if "instruction" in output_json and "result" in output_json:
-                    output_text = output_json["result"]
-            except json.JSONDecodeError:
-                pass
+                    # Process JSON response if applicable
+                    try:
+                        output_json = json.loads(output_text, strict=False)
+                        if "instruction" in output_json and "result" in output_json:
+                            output_text = output_json["result"]
+                    except json.JSONDecodeError:
+                        pass
 
-            # Add citations
-            if len(citations) > 0:
-                citation_num = 1
-                output_text = re.sub(r"%\[(\d+)\]%", r"<sup>[\1]</sup>", output_text)
-                citation_locs = ""
-                for citation in citations:
-                    for retrieved_ref in citation["retrievedReferences"]:
-                        citation_marker = f"[{citation_num}]"
-                        match retrieved_ref['location']['type']:
-                            case 'CONFLUENCE':
-                                citation_locs += f"\n<br>{citation_marker} {retrieved_ref['location']['confluenceLocation']['url']}"
-                            case 'CUSTOM':
-                                citation_locs += f"\n<br>{citation_marker} {retrieved_ref['location']['customDocumentLocation']['id']}"
-                            case 'KENDRA':
-                                citation_locs += f"\n<br>{citation_marker} {retrieved_ref['location']['kendraDocumentLocation']['uri']}"
-                            case 'S3':
-                                citation_locs += f"\n<br>{citation_marker} {retrieved_ref['location']['s3Location']['uri']}"
-                            case 'SALESFORCE':
-                                citation_locs += f"\n<br>{citation_marker} {retrieved_ref['location']['salesforceLocation']['url']}"
-                            case 'SHAREPOINT':
-                                citation_locs += f"\n<br>{citation_marker} {retrieved_ref['location']['sharePointLocation']['url']}"
-                            case 'SQL':
-                                citation_locs += f"\n<br>{citation_marker} {retrieved_ref['location']['sqlLocation']['query']}"
-                            case 'WEB':
-                                citation_locs += f"\n<br>{citation_marker} {retrieved_ref['location']['webLocation']['url']}"
-                            case _:
-                                logger.warning(f"Unknown location type: {retrieved_ref['location']['type']}")
-                        citation_num += 1
-                output_text += f"\n{citation_locs}"
+                    # Process citations
+                    if citations:
+                        citation_num = 1
+                        output_text = re.sub(r"%\[(\d+)\]%", r"<sup>[\1]</sup>", output_text)
+                        citation_locs = ""
+                        
+                        for citation in citations:
+                            for retrieved_ref in citation["retrievedReferences"]:
+                                citation_marker = f"[{citation_num}]"
+                                location_type = retrieved_ref['location']['type']
+                                
+                                # Handle different citation types
+                                try:
+                                    match location_type:
+                                        case 'CONFLUENCE':
+                                            citation_locs += f"\n<br>{citation_marker} {retrieved_ref['location']['confluenceLocation']['url']}"
+                                        case 'CUSTOM':
+                                            citation_locs += f"\n<br>{citation_marker} {retrieved_ref['location']['customDocumentLocation']['id']}"
+                                        case 'KENDRA':
+                                            citation_locs += f"\n<br>{citation_marker} {retrieved_ref['location']['kendraDocumentLocation']['uri']}"
+                                        case 'S3':
+                                            citation_locs += f"\n<br>{citation_marker} {retrieved_ref['location']['s3Location']['uri']}"
+                                        case 'SALESFORCE':
+                                            citation_locs += f"\n<br>{citation_marker} {retrieved_ref['location']['salesforceLocation']['url']}"
+                                        case 'SHAREPOINT':
+                                            citation_locs += f"\n<br>{citation_marker} {retrieved_ref['location']['sharePointLocation']['url']}"
+                                        case 'SQL':
+                                            citation_locs += f"\n<br>{citation_marker} {retrieved_ref['location']['sqlLocation']['query']}"
+                                        case 'WEB':
+                                            citation_locs += f"\n<br>{citation_marker} {retrieved_ref['location']['webLocation']['url']}"
+                                        case _:
+                                            logger.warning(f"Unknown citation location type: {location_type}")
+                                except Exception as e:
+                                    logger.error(f"Error processing citation {citation_num}: {str(e)}")
+                                
+                                citation_num += 1
+                        
+                        output_text += f"\n{citation_locs}"
 
+            except ClientError as e:
+                error_code = e.response['Error']['Code']
+                error_message = e.response['Error']['Message']
+                logger.error(f"AWS Error: {error_code} - {error_message}")
+                st.error(f"AWS Error: {error_message}")
+                output_text = "Sorry, there was an error processing your request."
+                citations = []
+                trace = {}
+            
+            except Exception as e:
+                logger.error(f"Unexpected error: {str(e)}", exc_info=True)
+                st.error(f"An unexpected error occurred: {str(e)}")
+                output_text = "Sorry, there was an error processing your request."
+                citations = []
+                trace = {}
+
+            # Update session state and display response
             st.session_state.messages.append({"role": "assistant", "content": output_text})
             st.session_state.citations = citations
             st.session_state.trace = trace
@@ -137,16 +193,15 @@ trace_info_types_map = {
     "postProcessingTrace": ["modelInvocationInput", "modelInvocationOutput", "observation"]
 }
 
-# Sidebar section for trace
+# Sidebar trace information
 with st.sidebar:
     st.title("Trace")
 
-    # Show each trace type in separate sections
+    # Display trace information
     step_num = 1
     for trace_type_header in trace_types_map:
         st.subheader(trace_type_header)
 
-        # Organize traces by step similar to how it is shown in the Bedrock console
         has_trace = False
         for trace_type in trace_types_map[trace_type_header]:
             if trace_type in st.session_state.trace:
@@ -181,6 +236,7 @@ with st.sidebar:
         if not has_trace:
             st.text("None")
 
+    # Display citations
     st.subheader("Citations")
     if len(st.session_state.citations) > 0:
         citation_num = 1
