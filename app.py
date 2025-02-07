@@ -75,18 +75,18 @@ if prompt := st.chat_input():
                         agentId=agent_id,
                         agentAliasId=agent_alias_id,
                         sessionId=st.session_state.session_id,
-                        input={
-                            'text': prompt
-                        }
+                        inputText=prompt
                     )
                     
-                    output_text = response['completion']
+                    output_text = response.get('completion', '')
                     citations = response.get('citations', [])
+                    trace = response.get('trace', {})
                     
                 except Exception as e:
                     logger.error(f"Error invoking Bedrock agent: {str(e)}")
                     output_text = "I apologize, but I encountered an error. Please try again."
                     citations = []
+                    trace = {}
 
             # Check if the output is a JSON object with the instruction and result fields
             try:
@@ -128,7 +128,7 @@ if prompt := st.chat_input():
 
             st.session_state.messages.append({"role": "assistant", "content": output_text})
             st.session_state.citations = citations
-            st.session_state.trace = response.get('trace', {})
+            st.session_state.trace = trace
             st.markdown(output_text, unsafe_allow_html=True)
 
 trace_types_map = {
