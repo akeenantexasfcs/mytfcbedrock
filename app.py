@@ -9,7 +9,7 @@ import logging
 import logging.config
 import os
 import re
-from services import bedrock_agent_runtime
+import boto3
 import streamlit as st
 import uuid
 import yaml
@@ -31,10 +31,13 @@ agent_alias_id = st.secrets["BEDROCK_AGENT_ALIAS_ID"]
 ui_title = st.secrets["BEDROCK_AGENT_TEST_UI_TITLE"]
 ui_icon = st.secrets["BEDROCK_AGENT_TEST_UI_ICON"]
 
-# Set AWS credentials from secrets
-os.environ["AWS_ACCESS_KEY_ID"] = st.secrets["AWS_ACCESS_KEY_ID"]
-os.environ["AWS_SECRET_ACCESS_KEY"] = st.secrets["AWS_SECRET_ACCESS_KEY"]
-os.environ["AWS_DEFAULT_REGION"] = st.secrets["AWS_DEFAULT_REGION"]
+# Initialize the Bedrock Runtime client
+bedrock_agent_runtime = boto3.client(
+    service_name='bedrock-agent-runtime',
+    aws_access_key_id=st.secrets["AWS_ACCESS_KEY_ID"],
+    aws_secret_access_key=st.secrets["AWS_SECRET_ACCESS_KEY"],
+    region_name=st.secrets["AWS_DEFAULT_REGION"]
+)
 
 def init_session_state():
     st.session_state.session_id = str(uuid.uuid4())
@@ -67,29 +70,38 @@ if prompt := st.chat_input():
     with st.chat_message("assistant"):
         with st.empty():
             with st.spinner():
-                response = bedrock_agent_runtime.invoke_agent(
-                    agent_id,
-                    agent_alias_id,
-                    st.session_state.session_id,
-                    prompt
-                )
-            output_text = response["output_text"]
+                try:
+                    response = bedrock_agent_runtime.invoke_agent(
+                        agentId=agent_id,
+                        agentAliasId=agent_alias_id,
+                        sessionId=st.session_state.session_id,
+                        input={
+                            'text': prompt
+                        }
+                    )
+                    
+                    output_text = response['completion']
+                    citations = response.get('citations', [])
+                    
+                except Exception as e:
+                    logger.error(f"Error invoking Bedrock agent: {str(e)}")
+                    output_text = "I apologize, but I encountered an error. Please try again."
+                    citations = []
 
             # Check if the output is a JSON object with the instruction and result fields
             try:
-                # When parsing the JSON, strict mode must be disabled to handle badly escaped newlines
                 output_json = json.loads(output_text, strict=False)
                 if "instruction" in output_json and "result" in output_json:
                     output_text = output_json["result"]
-            except json.JSONDecodeError as e:
+            except json.JSONDecodeError:
                 pass
 
             # Add citations
-            if len(response["citations"]) > 0:
+            if len(citations) > 0:
                 citation_num = 1
                 output_text = re.sub(r"%\[(\d+)\]%", r"<sup>[\1]</sup>", output_text)
                 citation_locs = ""
-                for citation in response["citations"]:
+                for citation in citations:
                     for retrieved_ref in citation["retrievedReferences"]:
                         citation_marker = f"[{citation_num}]"
                         match retrieved_ref['location']['type']:
@@ -115,8 +127,8 @@ if prompt := st.chat_input():
                 output_text += f"\n{citation_locs}"
 
             st.session_state.messages.append({"role": "assistant", "content": output_text})
-            st.session_state.citations = response["citations"]
-            st.session_state.trace = response["trace"]
+            st.session_state.citations = citations
+            st.session_state.trace = response.get('trace', {})
             st.markdown(output_text, unsafe_allow_html=True)
 
 trace_types_map = {
