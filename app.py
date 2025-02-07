@@ -92,11 +92,6 @@ with st.sidebar:
     if st.button("Reset Session"):
         init_session_state()
 
-# Display conversation history
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"], unsafe_allow_html=True)
-
 def process_event_stream(response_stream):
     """Processes streaming responses from Bedrock."""
     logger.info("Processing EventStream response from Bedrock agent.")
@@ -143,7 +138,7 @@ def process_dict_response(response):
         debug_log("'completion' is an EventStream -> using process_event_stream()")
         return process_event_stream(response["completion"])
 
-    # 1) If it looks like a Bedrock Agent response with 'modelInvocationOutput' (not your case, but just in case)
+    # 1) If it looks like a Bedrock Agent response with 'modelInvocationOutput'
     if "modelInvocationOutput" in response:
         debug_log("Detected 'modelInvocationOutput' key -> Attempting to parse agent response")
         agent_output = response["modelInvocationOutput"]
@@ -222,10 +217,14 @@ def process_dict_response(response):
     return "Error: Invalid response format"
 
 if prompt := st.chat_input():
+    # 1) Record the user prompt
     st.session_state.messages.append({"role": "user", "content": prompt})
+
+    # 2) We create a chat_message block for the user
     with st.chat_message("user"):
         st.write(prompt)
 
+    # 3) Placeholder for the assistant response
     with st.chat_message("assistant"):
         with st.empty():
             try:
@@ -233,12 +232,10 @@ if prompt := st.chat_input():
                 debug_log("Starting agent invocation...")
 
                 with st.spinner("Processing your request..."):
-                    # Log agent configuration
                     logger.info(f"Agent ID: {BEDROCK_AGENT_ID}")
                     logger.info(f"Agent Alias ID: {BEDROCK_AGENT_ALIAS_ID}")
                     logger.info(f"Session ID: {st.session_state.session_id}")
 
-                    # Invoke Bedrock agent
                     response = bedrock_client.invoke_agent(
                         agentId=BEDROCK_AGENT_ID,
                         agentAliasId=BEDROCK_AGENT_ALIAS_ID,
@@ -250,12 +247,11 @@ if prompt := st.chat_input():
                     citations = []
                     trace = {}
 
-                    # 1) Check if it's an EventStream directly
+                    # Check if it's an EventStream or a dict
                     if isinstance(response, (botocore.eventstream.EventStream, EventStream)):
                         logger.info("Processing EventStream response from Bedrock agent.")
                         output_text = process_event_stream(response)
 
-                    # 2) Otherwise treat it like a dictionary with possible EventStream in 'completion'
                     elif isinstance(response, dict):
                         logger.info("Processing dictionary response from Bedrock agent.")
                         output_text = process_dict_response(response)
@@ -293,9 +289,15 @@ if prompt := st.chat_input():
                 st.error(f"An unexpected error occurred: {str(e)}")
                 output_text = "Sorry, there was an error processing your request."
 
+            # 4) Add the assistant's message to session state
             st.session_state.messages.append({"role": "assistant", "content": output_text})
+
+            # 5) Render the assistant message in the placeholder above
             st.markdown(output_text, unsafe_allow_html=True)
 
-            if debug_mode:
-                st.write("Response processing complete")
+# 6) Finally, after user+assistant logic, re-render the conversation history
+#    so the final assistant message is also shown.
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"], unsafe_allow_html=True)
 
