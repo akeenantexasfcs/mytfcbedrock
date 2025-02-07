@@ -190,22 +190,8 @@ if prompt := st.chat_input():
                     citations = []
                     trace = {}
                     
-                    # Log response type
-                    logger.info(f"Response type: {type(response)}")
-                    if debug_mode:
-                        st.write(f"Response type: {type(response)}")
-                    
-                    # Case 1: Dictionary response
-                    if isinstance(response, dict):
-                        logger.info("Processing JSON response from Bedrock agent.")
-                        if debug_mode:
-                            st.write("Response keys:", response.keys())
-                        output_text = response.get("completion", {}).get("promptOutput", {}).get("text", "No response generated")
-                        citations = response.get("citations", [])
-                        trace = response.get("trace", {})
-                    
-                    # Case 2: EventStream response
-                    elif isinstance(response, (botocore.eventstream.EventStream, EventStream)):
+                    # FIRST check if it's an EventStream
+                    if isinstance(response, (botocore.eventstream.EventStream, EventStream)):
                         logger.info("Processing EventStream response from Bedrock agent.")
                         chunks = []
                         for event in response:
@@ -228,6 +214,15 @@ if prompt := st.chat_input():
                         output_text = "".join(chunks)
                         if debug_mode:
                             st.write(f"Assembled text length: {len(output_text)}")
+                            
+                    # Only try dictionary methods if it's actually a dictionary
+                    elif isinstance(response, dict):
+                        logger.info("Processing dictionary response from Bedrock agent.")
+                        if debug_mode:
+                            st.write("Response keys:", response.keys())
+                        output_text = response.get("completion", {}).get("promptOutput", {}).get("text", "No response generated")
+                        citations = response.get("citations", [])
+                        trace = response.get("trace", {})
                     
                     else:
                         logger.error(f"Unexpected response type: {type(response)}")
