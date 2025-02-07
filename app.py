@@ -124,110 +124,103 @@ def process_event_stream(response_stream):
 def process_dict_response(response):
     """
     Processes dictionary responses from Bedrock (Agent or Model).
-    Detailed debug logs show exactly what keys exist and attempts
-    to parse the JSON in rawResponse -> content if it exists.
+    We'll detect if the dictionary has a 'completion' field that is an EventStream,
+    then handle it accordingly.
     """
-    # Log the entire dictionary for debugging:
     debug_log("Raw dictionary response from Bedrock:")
 
-    # Attempt to dump the entire response for inspection
     try:
-        debug_log(json.dumps(response, indent=2, default=str))  # default=str handles non-serializable objects
+        # Dump safely
+        debug_log(json.dumps(response, indent=2, default=str))
     except Exception as e:
         debug_log(f"Failed to JSON-dump the response: {str(e)}")
 
-    try:
-        # Show top-level keys
-        top_keys = list(response.keys())
-        debug_log(f"Top-level keys in response: {top_keys}")
+    top_keys = list(response.keys())
+    debug_log(f"Top-level keys in response: {top_keys}")
 
-        # --- 1) If it looks like a Bedrock Agent response with 'modelInvocationOutput'
-        if "modelInvocationOutput" in response:
-            debug_log("Detected 'modelInvocationOutput' key -> Attempting to parse agent response")
-            agent_output = response["modelInvocationOutput"]
-            raw_resp = agent_output.get("rawResponse", {})
-            raw_json_str = raw_resp.get("content", "")
+    # If the 'completion' field is an EventStream, parse it that way
+    if "completion" in response and isinstance(response["completion"], (EventStream, botocore.eventstream.EventStream)):
+        debug_log("'completion' is an EventStream -> using process_event_stream()")
+        return process_event_stream(response["completion"])
 
-            debug_log(f"raw_json_str length: {len(raw_json_str)}")
+    # 1) If it looks like a Bedrock Agent response with 'modelInvocationOutput' (not your case, but just in case)
+    if "modelInvocationOutput" in response:
+        debug_log("Detected 'modelInvocationOutput' key -> Attempting to parse agent response")
+        agent_output = response["modelInvocationOutput"]
+        raw_resp = agent_output.get("rawResponse", {})
+        raw_json_str = raw_resp.get("content", "")
 
-            if raw_json_str:
-                try:
-                    parsed_json = json.loads(raw_json_str)
-                    debug_log(f"Keys in parsed_json: {list(parsed_json.keys())}")
+        debug_log(f"raw_json_str length: {len(raw_json_str)}")
 
-                    # If there's an 'observation' array at the top level
-                    if "observation" in response and isinstance(response["observation"], list):
-                        debug_log(f"Found 'observation' array with length {len(response['observation'])}")
-                        final_obs = response["observation"][-1]
-                        if isinstance(final_obs, dict) and "finalResponse" in final_obs:
-                            final_resp = final_obs["finalResponse"].get("text", "")
-                            if final_resp:
-                                debug_log(f"Extracted finalResponse.text with length: {len(final_resp)}")
-                                return final_resp
+        if raw_json_str:
+            try:
+                parsed_json = json.loads(raw_json_str)
+                debug_log(f"Keys in parsed_json: {list(parsed_json.keys())}")
 
-                    # Otherwise, parse the 'content' array
-                    if "content" in parsed_json and isinstance(parsed_json["content"], list):
-                        text_chunks = []
-                        for item in parsed_json["content"]:
-                            if "text" in item and item["text"]:
-                                text_chunks.append(item["text"])
-                        joined_text = "\n".join(text_chunks).strip()
-                        if joined_text:
-                            debug_log(f"Extracted joined_text with length: {len(joined_text)}")
-                            return joined_text
+                if "observation" in response and isinstance(response["observation"], list):
+                    debug_log(f"Found 'observation' array with length {len(response['observation'])}")
+                    final_obs = response["observation"][-1]
+                    if isinstance(final_obs, dict) and "finalResponse" in final_obs:
+                        final_resp = final_obs["finalResponse"].get("text", "")
+                        if final_resp:
+                            debug_log(f"Extracted finalResponse.text with length: {len(final_resp)}")
+                            return final_resp
 
-                    debug_log("No text found in 'observation' or 'content' for Agent response.")
-                    return "No response generated from Bedrock Agent."
+                # Otherwise parse 'content' array in the parsed JSON
+                if "content" in parsed_json and isinstance(parsed_json["content"], list):
+                    text_chunks = []
+                    for item in parsed_json["content"]:
+                        if "text" in item and item["text"]:
+                            text_chunks.append(item["text"])
+                    joined_text = "\n".join(text_chunks).strip()
+                    if joined_text:
+                        debug_log(f"Extracted joined_text with length: {len(joined_text)}")
+                        return joined_text
 
-                except json.JSONDecodeError as jerr:
-                    debug_log(f"JSONDecodeError parsing Agent 'rawResponse': {str(jerr)}")
-                    return "Error: Failed to parse the Agent rawResponse JSON."
+                debug_log("No text found in 'observation' or 'content' for Agent response.")
+                return "No response generated from Bedrock Agent."
 
-        # --- 2) Check for a standard model-based response with top-level "completion"
-        if "completion" in response:
-            debug_log("Detected top-level 'completion' key -> Attempting to parse model style response")
-            completion = response["completion"]
-            # Log the completion dict
-            debug_log(f"completion: {completion}")
+            except json.JSONDecodeError as jerr:
+                debug_log(f"JSONDecodeError parsing Agent 'rawResponse': {str(jerr)}")
+                return "Error: Failed to parse the Agent rawResponse JSON."
 
-            if not isinstance(completion, dict):
-                debug_log("completion is not a dict, can't parse further.")
-                return "Error: Invalid 'completion' format"
+    # 2) Check for a standard model-based response with top-level "completion"
+    if "completion" in response:
+        debug_log("Detected top-level 'completion' key -> Attempting to parse model style response")
+        completion = response["completion"]
+        debug_log(f"completion: {completion}")
 
-            # Check for standard structure
-            if "promptOutput" in completion:
-                prompt_output = completion["promptOutput"]
-                debug_log(f"Found 'promptOutput' in completion. Keys: {list(prompt_output.keys()) if isinstance(prompt_output, dict) else 'not dict'}")
-                if isinstance(prompt_output, dict):
-                    text = prompt_output.get("text", "")
-                    if text:
-                        debug_log(f"Extracted text from completion.promptOutput with length: {len(text)}")
-                        return text
-                    else:
-                        debug_log("No text in promptOutput.")
-            
-            # If no promptOutput, see if there's a direct 'text' key in 'completion'
-            if "text" in completion:
-                text_val = completion["text"]
-                if text_val:
-                    debug_log(f"Extracted text from completion['text'] with length: {len(text_val)}")
-                    return text_val
+        if not isinstance(completion, dict):
+            debug_log("completion is not a dict, can't parse further.")
+            return "Error: Invalid 'completion' format"
+
+        # Check for standard structure
+        if "promptOutput" in completion:
+            prompt_output = completion["promptOutput"]
+            debug_log(f"Found 'promptOutput' in completion. Keys: {list(prompt_output.keys()) if isinstance(prompt_output, dict) else 'not dict'}")
+            if isinstance(prompt_output, dict):
+                text = prompt_output.get("text", "")
+                if text:
+                    debug_log(f"Extracted text from completion.promptOutput with length: {len(text)}")
+                    return text
                 else:
-                    debug_log("completion['text'] is empty.")
-            
-            # Potentially other structures in completion?
-            debug_log("No recognized sub-structure in 'completion'. Returning error.")
-            return "Error: Invalid response format"
+                    debug_log("No text in promptOutput.")
 
-        # If everything fails, we log out the fallback
-        debug_log("No recognized response format found. Returning error.")
+        # If no promptOutput, see if there's a direct 'text' key in 'completion'
+        if "text" in completion:
+            text_val = completion["text"]
+            if text_val:
+                debug_log(f"Extracted text from completion['text'] with length: {len(text_val)}")
+                return text_val
+            else:
+                debug_log("completion['text'] is empty.")
+
+        debug_log("No recognized sub-structure in 'completion'. Returning error.")
         return "Error: Invalid response format"
 
-    except Exception as e:
-        logger.error(f"Error processing dictionary response: {str(e)}", exc_info=True)
-        return f"Error processing response: {str(e)}"
+    debug_log("No recognized response format found. Returning error.")
+    return "Error: Invalid response format"
 
-# Chat input and response handling
 if prompt := st.chat_input():
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -257,12 +250,12 @@ if prompt := st.chat_input():
                     citations = []
                     trace = {}
 
-                    # 1) Check if it's an EventStream
+                    # 1) Check if it's an EventStream directly
                     if isinstance(response, (botocore.eventstream.EventStream, EventStream)):
                         logger.info("Processing EventStream response from Bedrock agent.")
                         output_text = process_event_stream(response)
 
-                    # 2) Otherwise treat it like a dictionary
+                    # 2) Otherwise treat it like a dictionary with possible EventStream in 'completion'
                     elif isinstance(response, dict):
                         logger.info("Processing dictionary response from Bedrock agent.")
                         output_text = process_dict_response(response)
@@ -274,7 +267,6 @@ if prompt := st.chat_input():
                     if not output_text:
                         output_text = "No response generated"
 
-                    # For demonstration, logging citations/trace for your reference:
                     logger.info(f"Extracted output text: {output_text}")
                     logger.info(f"Citations found: {len(citations)}")
                     logger.info(f"Trace data present: {'Yes' if trace else 'No'}")
@@ -301,7 +293,6 @@ if prompt := st.chat_input():
                 st.error(f"An unexpected error occurred: {str(e)}")
                 output_text = "Sorry, there was an error processing your request."
 
-            # Update session state and display response
             st.session_state.messages.append({"role": "assistant", "content": output_text})
             st.markdown(output_text, unsafe_allow_html=True)
 
