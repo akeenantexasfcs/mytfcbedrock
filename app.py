@@ -167,13 +167,18 @@ if prompt := st.chat_input():
                     logger.info("Response type: " + str(type(response)))
                     debug_log("Received response from agent")
                     
-                    if debug_mode:
-                        st.code(f"Raw Response:\n{json.dumps(response, indent=2, default=str)}", language="json")
-                        st.write("Response Keys:", list(response.keys()) if isinstance(response, dict) else "Not a dictionary")
+                    # Process the response stream
+                    full_response = []
+                    for event in response['completion']['promptOutput']['text']:
+                        if debug_mode:
+                            st.write(f"Processing event: {event}")
+                        full_response.append(event)
                     
-                    # Extract completion from response
-                    completion = response.get('completion', {})
-                    output_text = completion.get('promptOutput', {}).get('text', 'No response generated')
+                    # Combine the response parts
+                    output_text = ''.join(full_response)
+                    if not output_text:
+                        output_text = "No response generated"
+                        
                     citations = response.get('citations', [])
                     trace = response.get('trace', {})
                     
