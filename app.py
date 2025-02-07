@@ -46,6 +46,28 @@ def init_session_state():
    st.session_state.citations = []
    st.session_state.trace = {}
 
+def process_agent_events(payload):
+   """Process events from the agent's event stream"""
+   output_text = ""
+   citations = []
+   trace = {}
+   
+   for event in payload.iter_lines():
+       if event:
+           try:
+               event_json = json.loads(event.decode("utf-8") if isinstance(event, bytes) else event)
+               if "completion" in event_json:
+                   output_text += event_json["completion"]
+               if "citations" in event_json:
+                   citations.extend(event_json["citations"])
+               if "trace" in event_json:
+                   trace.update(event_json["trace"])
+           except Exception as json_err:
+               logger.error(f"Error parsing event stream JSON: {json_err}")
+               continue
+   
+   return output_text, citations, trace
+
 # General page configuration and initialization
 st.set_page_config(page_title=ui_title, page_icon=ui_icon, layout="wide")
 st.title(ui_title)
@@ -86,20 +108,18 @@ if prompt := st.chat_input():
                    )
                    
                    logger.debug(f"Raw response type: {type(response)}")
-                   logger.debug(f"Raw response: {response}")
+                   logger.debug(f"Raw response keys: {response.keys() if isinstance(response, dict) else 'No keys'}")
                    
-                   # Handle different response types
-                   if hasattr(response, 'read'):
+                   if isinstance(response, dict) and "Payload" in response:
+                       output_text, citations, trace = process_agent_events(response["Payload"])
+                   elif isinstance(response, dict) and "completion" in response:
+                       output_text = response["completion"]
+                   elif hasattr(response, "read"):
                        content = response.read()
-                       output_text = content.decode('utf-8') if isinstance(content, bytes) else str(content)
-                   elif isinstance(response, dict):
-                       if 'completion' in response:
-                           output_text = response['completion']
-                       else:
-                           output_text = str(response)
+                       output_text = content.decode("utf-8") if isinstance(content, bytes) else str(content)
                    else:
                        output_text = str(response)
-                       
+
                except ClientError as e:
                    error_code = e.response['Error']['Code']
                    error_message = e.response['Error']['Message']
