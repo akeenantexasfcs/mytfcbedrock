@@ -70,38 +70,35 @@ def process_bedrock_event_stream(event_stream):
 
     try:
         for event in event_stream:
-            logger.debug(f"Processing event: {event.keys()}")
-            
-            # Handle streaming chunks
+            logger.debug(f"Processing event: {list(event.keys())}")
+
             if "chunk" in event:
                 chunk_data = event["chunk"]["bytes"].decode("utf-8")
-                logger.debug(f"Received chunk data: {chunk_data[:200]}...")  # Log first 200 chars
-                
+                logger.debug(f"Received chunk data: {chunk_data[:200]}...")
                 try:
                     chunk_json = json.loads(chunk_data)
-                    # For web crawler agents, the response might be in different fields
                     if "completion" in chunk_json:
                         full_text += chunk_json["completion"]
                     elif "response" in chunk_json:
                         full_text += chunk_json["response"]
                     elif "answer" in chunk_json:
                         full_text += chunk_json["answer"]
-                    
-                    # Handle citations and trace data
+
+                    # Handle citations and trace
                     if "citations" in chunk_json:
                         citations.extend(chunk_json["citations"])
                     if "trace" in chunk_json:
                         trace.update(chunk_json["trace"])
+
                 except json.JSONDecodeError:
-                    # If chunk isn't valid JSON, append as raw text
+                    # If chunk isn't valid JSON, treat it as raw text
                     full_text += chunk_data
-            
-            # Handle non-chunk events (like end-of-stream markers)
+
             elif "continuationToken" in event:
                 logger.debug("Received continuation token")
             elif "internalServerException" in event:
                 logger.error(f"Server exception in stream: {event['internalServerException']}")
-            
+
     except Exception as e:
         logger.error(f"Error processing event stream: {str(e)}")
         return f"Error processing response: {str(e)}", [], {}
@@ -115,26 +112,24 @@ def process_response(response):
     """
     logger.debug(f"Processing response with keys: {list(response.keys())}")
     logger.debug(f"Response content type: {response.get('contentType')}")
-    
+
     # Handle streaming response
     if "body" in response:
         logger.debug("Processing streaming response")
         return process_bedrock_event_stream(response["body"])
-    
+
     # Handle direct completion response
     elif "completion" in response:
         logger.debug("Processing direct completion response")
         return response["completion"], response.get("citations", []), response.get("trace", {})
-    
-    # Handle web crawler specific response format
+
+    # Possibly handle other fields if your web-crawler agent uses a different key
     elif "answer" in response:
-        logger.debug("Processing web crawler answer response")
+        logger.debug("Processing 'answer' from response")
         return response["answer"], response.get("citations", []), response.get("trace", {})
-        
+
     else:
-        logger.error(
-            f"Unexpected response format. Keys: {list(response.keys())}"
-        )
+        logger.error(f"Unexpected response format. Keys: {list(response.keys())}")
         return (
             "Received unexpected response format. Please try again.",
             [],
@@ -168,12 +163,10 @@ for message in st.session_state.messages:
 # -----------------------------------------------------------------------------
 prompt = st.chat_input()
 if prompt:
-    # 1) User sends message
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.write(prompt)
 
-    # 2) Prepare container for assistant response
     with st.chat_message("assistant"):
         with st.empty():
             with st.spinner("Processing..."):
@@ -190,15 +183,14 @@ if prompt:
                         sessionId=st.session_state.session_id,
                         inputText=prompt,
                         enableTrace=True,
+                        # Only valid streaming configuration keys:
                         streamingConfigurations={
-                            "applyGuardrailInterval": 100,  # Milliseconds between guardrail checks
-                            "streamFinalResponse": True     # Stream the final response
+                            "applyGuardrailInterval": 100,  # e.g. 100ms interval
+                            "streamFinalResponse": True
                         }
                     )
 
                     logger.debug(f"Agent response keys: {list(response.keys())}")
-                    
-                    # Process the response using our handler
                     output_text, citations, trace = process_response(response)
 
                 except ClientError as e:
@@ -214,16 +206,13 @@ if prompt:
 
                 except Exception as e:
                     logger.error(f"Unexpected error: {str(e)}")
-                    output_text = (
-                        "I encountered an unexpected error. Please try again."
-                    )
+                    output_text = "I encountered an unexpected error. Please try again."
                     citations = []
                     trace = {}
 
-            # 3) Add citations to the output text
+            # Append citations
             if citations:
                 citation_num = 1
-                # Convert placeholders %[#]% to superscript references
                 output_text = re.sub(r"%\[(\d+)\]%", r"<sup>[\1]</sup>", output_text)
                 citation_locs = ""
                 for citation_item in citations:
@@ -253,12 +242,12 @@ if prompt:
                         citation_num += 1
                 output_text += f"\n{citation_locs}"
 
-            # 4) Update session state with the assistant's response
+            # Save assistant message
             st.session_state.messages.append({"role": "assistant", "content": output_text})
             st.session_state.citations = citations
             st.session_state.trace = trace
 
-            # 5) Display the assistant's response
+            # Display assistant response
             st.markdown(output_text, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
