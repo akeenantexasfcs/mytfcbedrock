@@ -116,6 +116,24 @@ def process_event_stream(response_stream):
     logger.info(f"Final extracted text length: {len(final_text)}")
     return final_text if final_text else "No response generated"
 
+def parse_usage_info(response):
+    """
+    Try to extract usage stats (e.g., tokens used) from the response.
+    For many models, this is found in:
+      response["modelInvocationOutput"]["metadata"]["usage"]
+    But it can vary by model or agent. We return a dict either way.
+    """
+    usage_data = {}
+    try:
+        if isinstance(response, dict) and "modelInvocationOutput" in response:
+            model_inv_output = response["modelInvocationOutput"]
+            # Example path: response["modelInvocationOutput"]["metadata"]["usage"]
+            metadata = model_inv_output.get("metadata", {})
+            usage_data = metadata.get("usage", {})
+    except Exception as e:
+        logger.warning(f"Could not parse usage info: {str(e)}", exc_info=True)
+    return usage_data
+
 def process_dict_response(response):
     """
     Processes dictionary responses from Bedrock (Agent or Model).
@@ -220,49 +238,39 @@ def process_dict_response(response):
 
 prompt = st.chat_input()
 if prompt:
-    # Combine the user request into a single prompt that instructs the agent
-    # to use all knowledge bases. This is just a plain example string:
-    combined_prompt = f"Use all attached knowledge bases to answer: {prompt}"
-
-    # Store the user prompt in session state for chat history
+    # Store the user prompt
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    # Immediately show user message in chat
+    # We create a chat_message block for the user (for immediate display)
     with st.chat_message("user"):
         st.write(prompt)
 
-    # Now call the agent with the combined prompt
+    # Provide a placeholder for assistant while we process
     with st.chat_message("assistant"):
         with st.spinner("Processing your request..."):
             try:
-                logger.info(f"Invoking Bedrock agent with combined prompt: {combined_prompt}")
+                logger.info(f"Invoking Bedrock agent with prompt: {prompt}")
                 debug_log("Starting agent invocation...")
 
                 logger.info(f"Agent ID: {BEDROCK_AGENT_ID}")
                 logger.info(f"Agent Alias ID: {BEDROCK_AGENT_ALIAS_ID}")
                 logger.info(f"Session ID: {st.session_state.session_id}")
 
-                # Single agent call for multiple KB usage
                 response = bedrock_client.invoke_agent(
                     agentId=BEDROCK_AGENT_ID,
                     agentAliasId=BEDROCK_AGENT_ALIAS_ID,
                     sessionId=st.session_state.session_id,
-                    inputText=combined_prompt,
+                    inputText=prompt,
                 )
 
+                # parse the text from the response
                 output_text = "No response generated"
-                citations = []
-                trace = {}
-
-                # Check if it's an EventStream or a dict
                 if isinstance(response, (botocore.eventstream.EventStream, EventStream)):
                     logger.info("Processing EventStream response from Bedrock agent.")
                     output_text = process_event_stream(response)
-
                 elif isinstance(response, dict):
                     logger.info("Processing dictionary response from Bedrock agent.")
                     output_text = process_dict_response(response)
-
                 else:
                     logger.error(f"Unexpected response type: {type(response)}")
                     output_text = "Error: Unexpected response format from Bedrock."
@@ -270,20 +278,14 @@ if prompt:
                 if not output_text:
                     output_text = "No response generated"
 
-                logger.info(f"Extracted output text: {output_text}")
-                logger.info(f"Citations found: {len(citations)}")
-                logger.info(f"Trace data present: {'Yes' if trace else 'No'}")
+                # Also parse usage info
+                usage_info = parse_usage_info(response)
+                logger.info(f"Usage info from Bedrock: {usage_info}")
 
-                # Debug info if checked
-                if debug_mode:
-                    st.json(
-                        {
-                            "Response Type": str(type(response)),
-                            "Output Length": len(output_text),
-                            "Citations Count": len(citations),
-                            "Has Trace": bool(trace),
-                        }
-                    )
+                # Show usage info in debug mode
+                if debug_mode and usage_info:
+                    st.write("**Usage Info**")
+                    st.json(usage_info)
 
             except ClientError as e:
                 error_code = e.response["Error"]["Code"]
@@ -297,10 +299,10 @@ if prompt:
                 st.error(f"An unexpected error occurred: {str(e)}")
                 output_text = "Sorry, there was an error processing your request."
 
-            # Store final assistant message
+            # Now store the assistant's reply in session state
             st.session_state.messages.append({"role": "assistant", "content": output_text})
 
-# Render conversation so each message appears exactly once
+# Re-render the entire conversation so the newest messages appear exactly once
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"], unsafe_allow_html=True)
