@@ -32,6 +32,19 @@ def init_session_state():
     st.session_state.citations = []
     st.session_state.trace = {}
 
+def check_aws_health():
+    """Check AWS connectivity and permissions"""
+    try:
+        session = boto3.Session()
+        sts = session.client('sts')
+        identity = sts.get_caller_identity()
+        logger.info(f"AWS Account: {identity['Account']}")
+        logger.info(f"IAM User/Role: {identity['Arn']}")
+        return True, identity
+    except Exception as e:
+        logger.error(f"AWS Health Check Failed: {str(e)}")
+        return False, None
+
 def setup_aws_credentials():
     """Set up AWS credentials from Streamlit secrets"""
     try:
@@ -54,19 +67,6 @@ def setup_aws_credentials():
         logger.error(f"Error setting up AWS credentials: {str(e)}")
         st.error("Failed to configure AWS credentials. Please check your secrets configuration.")
         return None
-
-def check_aws_health():
-    """Check AWS connectivity and permissions"""
-    try:
-        session = boto3.Session()
-        sts = session.client('sts')
-        identity = sts.get_caller_identity()
-        logger.info(f"AWS Account: {identity['Account']}")
-        logger.info(f"IAM User/Role: {identity['Arn']}")
-        return True
-    except Exception as e:
-        logger.error(f"AWS Health Check Failed: {str(e)}")
-        return False
 
 def initialize_bedrock_client(credentials):
     """Initialize the Bedrock client with explicit credentials"""
@@ -94,7 +94,7 @@ with st.sidebar:
     debug_mode = st.checkbox("Enable Debug Mode", value=False)
     if debug_mode:
         st.info("Debug mode enabled")
-        
+
 def debug_log(message):
     """Helper function for debug logging"""
     if debug_mode:
@@ -109,6 +109,15 @@ if len(st.session_state.items()) == 0:
 credentials = setup_aws_credentials()
 if not credentials:
     st.stop()
+
+# Run AWS health check
+aws_healthy, identity = check_aws_health()
+if not aws_healthy:
+    st.error("AWS Health Check Failed")
+    st.stop()
+
+if debug_mode:
+    st.sidebar.json({"AWS Account": identity['Account'], "IAM Role/User": identity['Arn']})
 
 # Initialize Bedrock client
 bedrock_client = initialize_bedrock_client(credentials)
@@ -140,7 +149,7 @@ if prompt := st.chat_input():
         with st.empty():
             try:
                 logger.info(f"Invoking Bedrock agent with prompt: {prompt}")
-                st.info("🔍 Debug: Starting agent invocation...")
+                debug_log("Starting agent invocation...")
                 
                 with st.spinner("Processing your request..."):
                     # Print agent configuration
@@ -156,36 +165,21 @@ if prompt := st.chat_input():
                     )
                     
                     logger.info("Response type: " + str(type(response)))
-                    st.info("🔍 Debug: Received response from agent")
+                    debug_log("Received response from agent")
                     
-                    # Handle EventStream response
-                    full_response = ""
-                    completion = {}
-                    citations = []
-                    trace = {}
+                    if debug_mode:
+                        st.code(f"Raw Response:\n{json.dumps(response, indent=2, default=str)}", language="json")
+                        st.write("Response Keys:", list(response.keys()) if isinstance(response, dict) else "Not a dictionary")
                     
-                    for event in response:
-                        logger.info(f"Event type: {type(event)}")
-                        if hasattr(event, 'completion'):
-                            completion = event.completion
-                            if hasattr(completion, 'promptOutput'):
-                                output = completion.promptOutput
-                                if hasattr(output, 'text'):
-                                    full_response += output.text
-                        
-                        if hasattr(event, 'citations'):
-                            citations.extend(event.citations)
-                        
-                        if hasattr(event, 'trace'):
-                            trace.update(event.trace)
+                    # Extract completion from response
+                    completion = response.get('completion', {})
+                    output_text = completion.get('promptOutput', {}).get('text', 'No response generated')
+                    citations = response.get('citations', [])
+                    trace = response.get('trace', {})
                     
-                    output_text = full_response if full_response else "No response generated"
-                    logger.info("Response processed successfully")
-                    st.info("🔍 Debug: Finished processing response")
-                    citations = completion.get('citations', [])
-                    trace = completion.get('trace', {})
-                    
-                    logger.info("Successfully received response from Bedrock agent")
+                    logger.info(f"Extracted output text: {output_text}")
+                    logger.info(f"Citations found: {len(citations)}")
+                    logger.info(f"Trace data present: {'Yes' if trace else 'No'}")
 
                     try:
                         output_json = json.loads(output_text, strict=False)
