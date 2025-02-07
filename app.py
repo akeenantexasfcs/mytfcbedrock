@@ -98,6 +98,32 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"], unsafe_allow_html=True)
 
+# Function to process streaming EventStream responses
+def process_event_stream(response_stream):
+    """Processes streaming responses from Bedrock."""
+    logger.info("Processing EventStream response from Bedrock agent.")
+    output_text = []
+
+    for event in response_stream:
+        if debug_mode:
+            st.write("Event received:", event)
+        logger.info(f"Received event: {event}")
+
+        # Extract text from EventStream chunk
+        try:
+            if isinstance(event, dict) and "chunk" in event:
+                chunk_data = event["chunk"]
+                if isinstance(chunk_data, dict) and "bytes" in chunk_data:
+                    chunk_text = chunk_data["bytes"].decode("utf-8")
+                    output_text.append(chunk_text)
+        except Exception as e:
+            logger.error(f"Error processing event stream chunk: {str(e)}")
+            continue
+
+    final_text = "".join(output_text)
+    logger.info(f"Final extracted text length: {len(final_text)}")
+    return final_text if final_text else "No response generated"
+
 # Chat input and response handling
 if prompt := st.chat_input():
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -134,42 +160,19 @@ if prompt := st.chat_input():
                     if debug_mode:
                         st.write(f"Response type: {type(response)}")
 
-                    # Process JSON response
+                    # Process dictionary response
                     if isinstance(response, dict):
                         logger.info("Processing JSON response from Bedrock agent.")
                         if debug_mode:
                             st.write("Response keys:", response.keys())
 
-                        output_text = (
-                            response.get("completion", {}).get("promptOutput", {}).get("text", "No response generated")
-                        )
+                        output_text = response.get("completion", {}).get("promptOutput", {}).get("text", "No response generated")
                         citations = response.get("citations", [])
                         trace = response.get("trace", {})
 
-                    # Process EventStream response
+                    # Process streaming EventStream response
                     elif isinstance(response, (botocore.eventstream.EventStream, EventStream)):
-                        logger.info("Processing EventStream response from Bedrock agent.")
-                        output_chunks = []
-
-                        for event in response:
-                            if debug_mode:
-                                st.write("Event received:", event)
-                            logger.info(f"Received event: {event}")
-
-                            # Extract text from EventStream chunk
-                            try:
-                                if isinstance(event, dict) and "chunk" in event:
-                                    chunk_data = event["chunk"]
-                                    if isinstance(chunk_data, dict) and "bytes" in chunk_data:
-                                        chunk_text = chunk_data["bytes"].decode("utf-8")
-                                        output_chunks.append(chunk_text)
-                            except Exception as chunk_error:
-                                logger.error(f"Error processing chunk: {str(chunk_error)}")
-                                continue
-
-                        output_text = "".join(output_chunks)
-                        if debug_mode:
-                            st.write(f"Assembled text length: {len(output_text)}")
+                        output_text = process_event_stream(response)
 
                     else:
                         logger.error(f"Unexpected response type: {type(response)}")
