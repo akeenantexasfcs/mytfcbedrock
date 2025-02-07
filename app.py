@@ -35,19 +35,16 @@ def init_session_state():
 def setup_aws_credentials():
     """Set up AWS credentials from Streamlit secrets"""
     try:
-        # Create explicit credentials
         credentials = {
             'aws_access_key_id': st.secrets["aws"]["access_key_id"].strip(),
             'aws_secret_access_key': st.secrets["aws"]["secret_access_key"].strip(),
             'region_name': st.secrets["aws"]["region"].strip()
         }
         
-        # Log credentials format (without actual values)
         logger.info(f"AWS Region: {credentials['region_name']}")
         logger.info(f"Access Key ID length: {len(credentials['aws_access_key_id'])}")
         logger.info(f"Secret Key length: {len(credentials['aws_secret_access_key'])}")
         
-        # Set environment variables
         os.environ['AWS_ACCESS_KEY_ID'] = credentials['aws_access_key_id']
         os.environ['AWS_SECRET_ACCESS_KEY'] = credentials['aws_secret_access_key']
         os.environ['AWS_DEFAULT_REGION'] = credentials['region_name']
@@ -69,16 +66,6 @@ def initialize_bedrock_client(credentials):
         
         client = session.client('bedrock-agent-runtime')
         logger.info("Bedrock client initialized successfully")
-        
-        # Test the client with a basic operation
-        try:
-            client.list_agent_aliases(agentId=BEDROCK_AGENT_ID)
-            logger.info("Successfully tested Bedrock client connection")
-        except ClientError as e:
-            if e.response['Error']['Code'] == 'InvalidSignatureException':
-                logger.error("Signature verification failed. Please check credentials format.")
-            raise
-            
         return client
     except Exception as e:
         logger.error(f"Error initializing Bedrock client: {str(e)}")
@@ -136,7 +123,6 @@ if prompt := st.chat_input():
                         inputText=prompt
                     )
                     
-                    # Extract response components
                     completion = response.get('completion', {})
                     output_text = completion.get('promptOutput', {}).get('text', '')
                     citations = completion.get('citations', [])
@@ -144,7 +130,6 @@ if prompt := st.chat_input():
                     
                     logger.info("Successfully received response from Bedrock agent")
 
-                    # Process JSON response if applicable
                     try:
                         output_json = json.loads(output_text, strict=False)
                         if "instruction" in output_json and "result" in output_json:
@@ -152,7 +137,6 @@ if prompt := st.chat_input():
                     except json.JSONDecodeError:
                         pass
 
-                    # Process citations
                     if citations:
                         citation_num = 1
                         output_text = re.sub(r"%\[(\d+)\]%", r"<sup>[\1]</sup>", output_text)
@@ -163,7 +147,6 @@ if prompt := st.chat_input():
                                 citation_marker = f"[{citation_num}]"
                                 location_type = retrieved_ref['location']['type']
                                 
-                                # Handle different citation types
                                 try:
                                     match location_type:
                                         case 'CONFLUENCE':
@@ -230,7 +213,6 @@ trace_info_types_map = {
 with st.sidebar:
     st.title("Trace")
 
-    # Display trace information
     step_num = 1
     for trace_type_header in trace_types_map:
         st.subheader(trace_type_header)
