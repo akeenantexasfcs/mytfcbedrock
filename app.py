@@ -78,23 +78,32 @@ if prompt := st.chat_input():
                         inputText=prompt
                     )
                     
-                    output_text = response.get('completion', '')
-                    citations = response.get('citations', [])
-                    trace = response.get('trace', {})
+                    # Handle EventStream response
+                    full_response = ""
+                    citations = []
+                    trace = {}
+                    
+                    for event in response['body']:
+                        if 'chunk' in event:
+                            chunk_data = event['chunk']['bytes'].decode('utf-8')
+                            try:
+                                chunk_json = json.loads(chunk_data)
+                                if 'completion' in chunk_json:
+                                    full_response += chunk_json['completion']
+                                if 'citations' in chunk_json:
+                                    citations.extend(chunk_json['citations'])
+                                if 'trace' in chunk_json:
+                                    trace.update(chunk_json['trace'])
+                            except json.JSONDecodeError:
+                                full_response += chunk_data
+                    
+                    output_text = full_response
                     
                 except Exception as e:
                     logger.error(f"Error invoking Bedrock agent: {str(e)}")
                     output_text = "I apologize, but I encountered an error. Please try again."
                     citations = []
                     trace = {}
-
-            # Check if the output is a JSON object with the instruction and result fields
-            try:
-                output_json = json.loads(output_text, strict=False)
-                if "instruction" in output_json and "result" in output_json:
-                    output_text = output_json["result"]
-            except json.JSONDecodeError:
-                pass
 
             # Add citations
             if len(citations) > 0:
