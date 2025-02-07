@@ -161,7 +161,7 @@ def process_dict_response(response):
                             debug_log(f"Extracted finalResponse.text with length: {len(final_resp)}")
                             return final_resp
 
-                # Otherwise parse 'content' array in the parsed JSON
+                # Otherwise parse 'content' array in the parsed_json
                 if "content" in parsed_json and isinstance(parsed_json["content"], list):
                     text_chunks = []
                     for item in parsed_json["content"]:
@@ -220,29 +220,34 @@ def process_dict_response(response):
 
 prompt = st.chat_input()
 if prompt:
-    # Store the user prompt
+    # Combine the user request into a single prompt that instructs the agent
+    # to use all knowledge bases. This is just a plain example string:
+    combined_prompt = f"Use all attached knowledge bases to answer: {prompt}"
+
+    # Store the user prompt in session state for chat history
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    # We create a chat_message block for the user (for immediate display)
+    # Immediately show user message in chat
     with st.chat_message("user"):
         st.write(prompt)
 
-    # Provide a placeholder for assistant while we process
+    # Now call the agent with the combined prompt
     with st.chat_message("assistant"):
         with st.spinner("Processing your request..."):
             try:
-                logger.info(f"Invoking Bedrock agent with prompt: {prompt}")
+                logger.info(f"Invoking Bedrock agent with combined prompt: {combined_prompt}")
                 debug_log("Starting agent invocation...")
 
                 logger.info(f"Agent ID: {BEDROCK_AGENT_ID}")
                 logger.info(f"Agent Alias ID: {BEDROCK_AGENT_ALIAS_ID}")
                 logger.info(f"Session ID: {st.session_state.session_id}")
 
+                # Single agent call for multiple KB usage
                 response = bedrock_client.invoke_agent(
                     agentId=BEDROCK_AGENT_ID,
                     agentAliasId=BEDROCK_AGENT_ALIAS_ID,
                     sessionId=st.session_state.session_id,
-                    inputText=prompt,
+                    inputText=combined_prompt,
                 )
 
                 output_text = "No response generated"
@@ -269,7 +274,7 @@ if prompt:
                 logger.info(f"Citations found: {len(citations)}")
                 logger.info(f"Trace data present: {'Yes' if trace else 'No'}")
 
-                # If user wants debug info, show it
+                # Debug info if checked
                 if debug_mode:
                     st.json(
                         {
@@ -292,10 +297,10 @@ if prompt:
                 st.error(f"An unexpected error occurred: {str(e)}")
                 output_text = "Sorry, there was an error processing your request."
 
-            # Now that we've finished, store the assistant's reply in session state
+            # Store final assistant message
             st.session_state.messages.append({"role": "assistant", "content": output_text})
 
-# Re-render the entire conversation so the newest messages appear exactly once
+# Render conversation so each message appears exactly once
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"], unsafe_allow_html=True)
