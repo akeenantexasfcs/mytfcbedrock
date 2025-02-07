@@ -216,66 +216,69 @@ def process_dict_response(response):
     debug_log("No recognized response format found. Returning error.")
     return "Error: Invalid response format"
 
-if prompt := st.chat_input():
-    # 1) Record the user prompt
+# ----- MAIN CHAT LOGIC -----
+
+prompt = st.chat_input()
+if prompt:
+    # Store the user prompt
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    # 2) We create a chat_message block for the user
+    # We create a chat_message block for the user (for immediate display)
     with st.chat_message("user"):
         st.write(prompt)
 
-    # 3) Placeholder for the assistant response
+    # Provide a placeholder for assistant while we process
     with st.chat_message("assistant"):
-        with st.empty():
+        with st.spinner("Processing your request..."):
             try:
                 logger.info(f"Invoking Bedrock agent with prompt: {prompt}")
                 debug_log("Starting agent invocation...")
 
-                with st.spinner("Processing your request..."):
-                    logger.info(f"Agent ID: {BEDROCK_AGENT_ID}")
-                    logger.info(f"Agent Alias ID: {BEDROCK_AGENT_ALIAS_ID}")
-                    logger.info(f"Session ID: {st.session_state.session_id}")
+                logger.info(f"Agent ID: {BEDROCK_AGENT_ID}")
+                logger.info(f"Agent Alias ID: {BEDROCK_AGENT_ALIAS_ID}")
+                logger.info(f"Session ID: {st.session_state.session_id}")
 
-                    response = bedrock_client.invoke_agent(
-                        agentId=BEDROCK_AGENT_ID,
-                        agentAliasId=BEDROCK_AGENT_ALIAS_ID,
-                        sessionId=st.session_state.session_id,
-                        inputText=prompt,
-                    )
+                response = bedrock_client.invoke_agent(
+                    agentId=BEDROCK_AGENT_ID,
+                    agentAliasId=BEDROCK_AGENT_ALIAS_ID,
+                    sessionId=st.session_state.session_id,
+                    inputText=prompt,
+                )
 
+                output_text = "No response generated"
+                citations = []
+                trace = {}
+
+                # Check if it's an EventStream or a dict
+                if isinstance(response, (botocore.eventstream.EventStream, EventStream)):
+                    logger.info("Processing EventStream response from Bedrock agent.")
+                    output_text = process_event_stream(response)
+
+                elif isinstance(response, dict):
+                    logger.info("Processing dictionary response from Bedrock agent.")
+                    output_text = process_dict_response(response)
+
+                else:
+                    logger.error(f"Unexpected response type: {type(response)}")
+                    output_text = "Error: Unexpected response format from Bedrock."
+
+                if not output_text:
                     output_text = "No response generated"
-                    citations = []
-                    trace = {}
 
-                    # Check if it's an EventStream or a dict
-                    if isinstance(response, (botocore.eventstream.EventStream, EventStream)):
-                        logger.info("Processing EventStream response from Bedrock agent.")
-                        output_text = process_event_stream(response)
+                logger.info(f"Extracted output text: {output_text}")
+                logger.info(f"Citations found: {len(citations)}")
+                logger.info(f"Trace data present: {'Yes' if trace else 'No'}")
 
-                    elif isinstance(response, dict):
-                        logger.info("Processing dictionary response from Bedrock agent.")
-                        output_text = process_dict_response(response)
-
-                    else:
-                        logger.error(f"Unexpected response type: {type(response)}")
-                        output_text = "Error: Unexpected response format from Bedrock."
-
-                    if not output_text:
-                        output_text = "No response generated"
-
-                    logger.info(f"Extracted output text: {output_text}")
-                    logger.info(f"Citations found: {len(citations)}")
-                    logger.info(f"Trace data present: {'Yes' if trace else 'No'}")
-
-                    if debug_mode:
-                        st.json(
-                            {
-                                "Response Type": str(type(response)),
-                                "Output Length": len(output_text),
-                                "Citations Count": len(citations),
-                                "Has Trace": bool(trace),
-                            }
-                        )
+                # If user wants debug info, show it
+                if debug_mode:
+                    st.json(
+                        {
+                            "Response Type": str(type(response)),
+                            "Output Length": len(output_text),
+                            "Citations Count": len(citations),
+                            "Has Trace": bool(trace),
+                        }
+                    )
 
             except ClientError as e:
                 error_code = e.response["Error"]["Code"]
@@ -289,14 +292,10 @@ if prompt := st.chat_input():
                 st.error(f"An unexpected error occurred: {str(e)}")
                 output_text = "Sorry, there was an error processing your request."
 
-            # 4) Add the assistant's message to session state
+            # Now that we've finished, store the assistant's reply in session state
             st.session_state.messages.append({"role": "assistant", "content": output_text})
 
-            # 5) Render the assistant message in the placeholder above
-            st.markdown(output_text, unsafe_allow_html=True)
-
-# 6) Finally, after user+assistant logic, re-render the conversation history
-#    so the final assistant message is also shown.
+# Re-render the entire conversation so the newest messages appear exactly once
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"], unsafe_allow_html=True)
