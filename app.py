@@ -102,32 +102,54 @@ if prompt := st.chat_input():
             
             # Process event stream
             output_text = []
+            # Before processing starts
             if debug_mode:
-                st.write("Starting response processing...")
-            
-            # Iterate through events
+                st.write("Response type:", type(response))
+                st.write("Response dir:", dir(response))
+                st.write("Is iterable:", hasattr(response, '__iter__'))
+                st.write("Starting event processing...")
+                
+            event_count = 0
             for event in response:
+                event_count += 1
+                if debug_mode:
+                    st.write(f"\nProcessing event {event_count}:")
+                    st.write("Event type:", type(event))
+                    st.write("Event dir:", dir(event))
+                    if hasattr(event, '__dict__'):
+                        st.write("Event dict:", event.__dict__)
                 try:
                     if debug_mode:
                         st.write("Event:", event)
-                        
-                    if hasattr(event, 'chunk') and hasattr(event.chunk, 'bytes'):
-                        # Direct byte access
-                        chunk_text = event.chunk.bytes.decode()
-                        output_text.append(chunk_text)
-                    elif isinstance(event, dict) and 'chunk' in event:
-                        # Dictionary access
-                        chunk = event['chunk']
-                        if isinstance(chunk, bytes):
-                            chunk_text = chunk.decode()
-                            output_text.append(chunk_text)
-                        elif isinstance(chunk, dict) and 'bytes' in chunk:
-                            chunk_text = chunk['bytes'].decode()
-                            output_text.append(chunk_text)
+                        st.write("Event type:", type(event))
+                        st.write("Event dir:", dir(event))
+                    
+                    # Handle completion event
+                    if hasattr(event, 'completion'):
+                        completion = event.completion
+                        if hasattr(completion, 'promptOutput') and hasattr(completion.promptOutput, 'text'):
+                            output_text.append(completion.promptOutput.text)
+                            if debug_mode:
+                                st.write("Found completion text:", completion.promptOutput.text)
+                    
+                    # Try different ways to access content
+                    elif hasattr(event, 'text'):
+                        output_text.append(event.text)
+                    elif hasattr(event, 'content'):
+                        output_text.append(event.content)
+                    elif isinstance(event, dict):
+                        # Try to find text in dictionary structure
+                        if 'completion' in event:
+                            completion = event['completion']
+                            if isinstance(completion, dict) and 'promptOutput' in completion:
+                                text = completion['promptOutput'].get('text', '')
+                                if text:
+                                    output_text.append(text)
                             
                 except Exception as e:
                     if debug_mode:
-                        st.error(f"Error processing chunk: {e}")
+                        st.error(f"Error processing event: {e}")
+                        st.write("Failed event:", event)
                     continue
             
             # Combine all chunks
