@@ -191,8 +191,8 @@ if prompt:
                         inputText=prompt,
                         enableTrace=True,
                         streamingConfigurations={
-                            "enableStreaming": True,
-                            "streamingStrategy": "ENABLE_ALL"
+                            "applyGuardrailInterval": 100,  # Milliseconds between guardrail checks
+                            "streamFinalResponse": True     # Stream the final response
                         }
                     )
 
