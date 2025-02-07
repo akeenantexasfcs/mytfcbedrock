@@ -61,43 +61,59 @@ def init_session_state():
 # -----------------------------------------------------------------------------
 def process_bedrock_event_stream(event_stream):
     """
-    Given a botocore.eventstream.EventStream object, parse the chunks
-    and build the full completion text, citations, and trace.
+    Process a streaming response from Bedrock Agent Runtime.
     Returns (full_text, citations, trace).
     """
     full_text = ""
     citations = []
     trace = {}
 
-    for event in event_stream:
-        if "chunk" in event:
-            chunk_data = event["chunk"]["bytes"].decode("utf-8")
-            try:
-                chunk_json = json.loads(chunk_data)
-                # If partial or full text is in "completion"
-                if "completion" in chunk_json:
-                    full_text += chunk_json["completion"]
-                # Merge any citations
-                if "citations" in chunk_json:
-                    citations.extend(chunk_json["citations"])
-                # Merge trace info
-                if "trace" in chunk_json:
-                    trace.update(chunk_json["trace"])
-            except json.JSONDecodeError as e:
-                logger.warning(f"Chunk not valid JSON: {e}\nRaw chunk: {chunk_data}")
-                full_text += chunk_data
+    try:
+        for event in event_stream:
+            if "chunk" in event:
+                chunk_data = event["chunk"]["bytes"].decode("utf-8")
+                try:
+                    chunk_json = json.loads(chunk_data)
+                    if "completion" in chunk_json:
+                        full_text += chunk_json["completion"]
+                    if "citations" in chunk_json:
+                        citations.extend(chunk_json["citations"])
+                    if "trace" in chunk_json:
+                        trace.update(chunk_json["trace"])
+                except json.JSONDecodeError:
+                    # If chunk isn't valid JSON, treat it as raw text
+                    full_text += chunk_data
+    except Exception as e:
+        logger.error(f"Error processing event stream: {str(e)}")
+        return f"Error processing response: {str(e)}", [], {}
 
     return full_text, citations, trace
 
-def process_bedrock_json_response(response):
+def process_response(response):
     """
-    Process a synchronous JSON response from Bedrock Agent Runtime.
+    Process both streaming and non-streaming responses from Bedrock Agent Runtime.
     Returns (full_text, citations, trace).
     """
-    full_text = response.get("completion", "")
-    citations = response.get("citations", [])
-    trace = response.get("trace", {})
-    return full_text, citations, trace
+    content_type = response.get("contentType")
+    
+    # Streaming scenario
+    if content_type == "text/event-stream" and "body" in response:
+        return process_bedrock_event_stream(response["body"])
+        
+    # Non-streaming JSON scenario
+    elif "completion" in response:
+        return response.get("completion", ""), response.get("citations", []), response.get("trace", {})
+        
+    else:
+        logger.error(
+            "Bedrock agent response has unexpected format. "
+            f"Response keys: {list(response.keys())}"
+        )
+        return (
+            "No valid response returned by the agent. Please try again.",
+            [],
+            {}
+        )
 
 # -----------------------------------------------------------------------------
 # Streamlit App: Page / Layout Config
@@ -134,10 +150,6 @@ if prompt:
     # 2) Prepare container for assistant response
     with st.chat_message("assistant"):
         with st.empty():
-            output_text = ""
-            citations = []
-            trace = {}
-
             with st.spinner("Processing..."):
                 # Invoke the agent
                 try:
@@ -154,26 +166,9 @@ if prompt:
                     )
 
                     logger.debug(f"Agent response keys: {list(response.keys())}")
-                    content_type = response.get("contentType")
-
-                    # Streaming scenario
-                    if content_type == "text/event-stream" and "body" in response:
-                        output_text, citations, trace = process_bedrock_event_stream(response["body"])
-
-                    # Non-streaming JSON scenario
-                    elif "completion" in response:
-                        output_text, citations, trace = process_bedrock_json_response(response)
-
-                    else:
-                        # Fallback: no recognized streaming body or completion
-                        logger.error(
-                            "Bedrock agent response has no 'body' or 'completion'. "
-                            f"Response keys: {list(response.keys())}"
-                        )
-                        output_text = (
-                            "No valid event stream or completion returned by the agent. "
-                            "Please check logs or try again."
-                        )
+                    
+                    # Process the response using our handler
+                    output_text, citations, trace = process_response(response)
 
                 except ClientError as e:
                     error_code = e.response["Error"]["Code"]
@@ -183,18 +178,16 @@ if prompt:
                         "I encountered an AWS service error. Please try again later. "
                         f"Error: {error_code}"
                     )
-
-                except json.JSONDecodeError as e:
-                    logger.error(f"JSON parsing error: {e}")
-                    output_text = (
-                        "I had trouble processing the JSON response. Please try again."
-                    )
+                    citations = []
+                    trace = {}
 
                 except Exception as e:
                     logger.error(f"Unexpected error: {str(e)}")
                     output_text = (
                         "I encountered an unexpected error. Please try again."
                     )
+                    citations = []
+                    trace = {}
 
             # 3) Add citations to the output text
             if citations:
