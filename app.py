@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 # Bedrock Agent Configuration
 BEDROCK_AGENT_ID = "VLZFRY26GV"
-BEDROCK_AGENT_ALIAS_ID = "8RQEV8A7HP"
+BEDROCK_AGENT_ALIAS_ID = "W7PPFVVEG4"
 UI_TITLE = "SOUTHERN AG AGENT"
 
 def init_session_state():
