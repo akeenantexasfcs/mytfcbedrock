@@ -17,7 +17,6 @@ import botocore
 from botocore.eventstream import EventStream
 from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
-from botocore.config import Config
 from botocore.exceptions import ClientError
 
 # Configure logging
@@ -32,13 +31,8 @@ BEDROCK_AGENT_ID = "VLZFRY26GV"
 BEDROCK_AGENT_ALIAS_ID = "QT0I0B0VIG"
 UI_TITLE = "SOUTHERN AG AGENT"
 
-#####################################
-# Initialize session state
-#####################################
 def init_session_state():
-    """
-    Ensures all necessary session state variables are defined.
-    """
+    """Ensures all necessary session state variables are defined."""
     if "session_id" not in st.session_state:
         st.session_state.session_id = str(uuid.uuid4())
     if "messages" not in st.session_state:
@@ -48,12 +42,9 @@ def init_session_state():
     if "trace" not in st.session_state:
         st.session_state.trace = {}
     if "knowledge_bases" not in st.session_state:
-        # This is the fix to ensure knowledge_bases always exists
         st.session_state.knowledge_bases = None
 
-#####################################
 # Page setup
-#####################################
 st.set_page_config(page_title=UI_TITLE, layout="wide")
 st.title(UI_TITLE)
 
@@ -73,12 +64,9 @@ def debug_log(message):
 if len(st.session_state.items()) == 0:
     init_session_state()
 else:
-    # If the script re-ran, still ensure everything is set
     init_session_state()
 
-#####################################
 # Set up AWS credentials
-#####################################
 try:
     credentials = {
         "aws_access_key_id": st.secrets["aws"]["access_key_id"].strip(),
@@ -99,9 +87,7 @@ except Exception as e:
     st.error("Failed to configure AWS credentials. Please check your secrets configuration.")
     st.stop()
 
-#####################################
 # Initialize Bedrock client
-#####################################
 try:
     session = boto3.Session(**credentials)
     bedrock_client = session.client("bedrock-agent-runtime")
@@ -113,9 +99,10 @@ except Exception as e:
 
 st.sidebar.success(f"Connected to AWS Region: {credentials['region_name']}")
 
-#####################################
-# Knowledge Base Listing Code
-#####################################
+########################
+# List Knowledge Bases #
+########################
+
 def list_knowledge_bases(max_results=10, next_token=None):
     """
     Calls the /knowledgebases/ endpoint directly using SigV4 signing.
@@ -126,13 +113,16 @@ def list_knowledge_bases(max_results=10, next_token=None):
     service = "bedrock"
     host = f"bedrock.{region}.amazonaws.com"
     endpoint = f"https://{host}/knowledgebases/"
-    
+
     payload = {"maxResults": max_results}
     if next_token:
         payload["nextToken"] = next_token
-    
+
     data = json.dumps(payload)
-    
+
+    from botocore.awsrequest import AWSRequest
+    from botocore.auth import SigV4Auth
+
     req = AWSRequest(
         method="POST",
         url=endpoint,
@@ -145,6 +135,7 @@ def list_knowledge_bases(max_results=10, next_token=None):
 
     SigV4Auth(botocore_creds, service, region).add_auth(req)
 
+    import requests
     prepared_request = requests.Request(
         method=req.method,
         url=req.url,
@@ -154,7 +145,7 @@ def list_knowledge_bases(max_results=10, next_token=None):
 
     with requests.Session() as s:
         response = s.send(prepared_request)
-    
+
     if debug_mode:
         st.write("ListKnowledgeBases status code:", response.status_code)
         try:
@@ -164,16 +155,17 @@ def list_knowledge_bases(max_results=10, next_token=None):
 
     if response.status_code != 200:
         raise Exception(f"ListKnowledgeBases failed: {response.status_code} - {response.text}")
-    
+
     return response.json()
 
-#####################################
-# Sidebar buttons
-#####################################
+################
+# Sidebar Logic
+################
 with st.sidebar:
     if st.button("Reset Session"):
         init_session_state()
-        st.experimental_rerun()
+        # No st.experimental_rerun -> just stop so the script restarts on next user action
+        st.stop()
 
     # Button to list knowledge bases
     if st.button("List Knowledge Bases"):
@@ -193,9 +185,10 @@ if st.session_state.knowledge_bases:
         kb_status = kb.get("status", "N/A")
         st.sidebar.write(f"• {kb_name} (ID={kb_id}, Status={kb_status})")
 
-#####################################
-# Throttling / EventStream
-#####################################
+#####################
+# Chat / Agent Logic
+#####################
+
 def process_event_stream(response_stream):
     logger.info("Processing EventStream response from Bedrock agent.")
     output_text = []
@@ -205,6 +198,7 @@ def process_event_stream(response_stream):
             st.write("Event received:", event)
         logger.info(f"Received event: {event}")
 
+        # Throttling check
         if isinstance(event, dict) and "error" in event:
             err = event["error"].get("message", "")
             if "Your request rate is too high" in err:
@@ -362,16 +356,16 @@ def invoke_agent_with_backoff(prompt, max_retries=2, backoff_base=60):
                     continue
                 else:
                     st.error("Max retries reached. Still throttled. Please wait or reduce request rate.")
-                    raise e  # re-raise so we display an error
+                    raise e
             else:
                 raise e
         except Exception as ex:
             logger.error(f"Unexpected error: {str(ex)}", exc_info=True)
             raise ex
 
-#####################################
-# Chat Input Logic
-#####################################
+#################################
+# Chat input and conversation
+#################################
 prompt = st.chat_input()
 if prompt:
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -381,7 +375,6 @@ if prompt:
     with st.chat_message("assistant"):
         with st.spinner("Processing your request..."):
             output_text = "No response generated"
-
             try:
                 debug_log("Starting agent invocation with backoff.")
                 response = invoke_agent_with_backoff(prompt)
@@ -417,9 +410,7 @@ if prompt:
 
             st.session_state.messages.append({"role": "assistant", "content": output_text})
 
-#####################################
-# Conversation Rerender
-#####################################
+# Finally re-render the conversation
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"], unsafe_allow_html=True)
