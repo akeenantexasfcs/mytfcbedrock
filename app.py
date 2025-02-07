@@ -167,9 +167,15 @@ if prompt := st.chat_input():
                     )
                     
                     logger.info(f"Response type: {type(response)}")
-                    debug_log("Received response from agent")
+                    if debug_mode:
+                        st.write("Raw response:", response)
                     
-                    # Handle EventStream response
+                    # Initialize output variables
+                    output_text = ""
+                    citations = []
+                    trace = {}
+                    
+                    # Handle different response types
                     if isinstance(response, botocore.eventstream.EventStream):
                         full_response = []
                         for event in response:
@@ -177,14 +183,29 @@ if prompt := st.chat_input():
                             if "chunk" in event:
                                 chunk_text = event["chunk"].get("bytes", "").decode("utf-8")
                                 full_response.append(chunk_text)
-                        
                         output_text = "".join(full_response)
-                    else:
-                        logger.error("Unexpected response format from Bedrock.")
-                        output_text = "Error: Unexpected response format from Bedrock."
+                    elif isinstance(response, dict):
+                        if 'completion' in response:
+                            output_text = response['completion'].get('promptOutput', {}).get('text', '')
+                            citations = response.get('citations', [])
+                            trace = response.get('trace', {})
+                        else:
+                            logger.error(f"Unexpected response format: {response.keys()}")
+                            output_text = "Error: Unexpected response format"
                     
                     if not output_text:
                         output_text = "No response generated"
+                    
+                    logger.info(f"Final output text: {output_text}")
+                    logger.info(f"Citations found: {len(citations)}")
+                    logger.info(f"Trace data present: {'Yes' if trace else 'No'}")
+                    
+                    if debug_mode:
+                        st.json({
+                            "Output Length": len(output_text),
+                            "Number of Citations": len(citations),
+                            "Has Trace Data": bool(trace)
+                        })
 
                     # No need to process citations and trace as they're not part of the stream
                     
