@@ -1,0 +1,6 @@
+streamlit>=1.30.0
+python-dotenv>=1.0.0
+pyyaml>=6.0.1
+boto3>=1.34.0
+botocore>=1.34.0
+amazon-bedrock-runtime>=1.0.0
