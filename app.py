@@ -129,18 +129,20 @@ def process_dict_response(response):
     """
     # Log the entire dictionary for debugging:
     debug_log("Raw dictionary response from Bedrock:")
+
+    # Attempt to dump the entire response for inspection
     try:
-        # Dump the entire response for inspection
-        debug_log(json.dumps(response, indent=2))
+        debug_log(json.dumps(response, indent=2, default=str))  # default=str handles non-serializable objects
     except Exception as e:
         debug_log(f"Failed to JSON-dump the response: {str(e)}")
 
     try:
         # Show top-level keys
-        debug_log(f"Top-level keys in response: {list(response.keys())}")
+        top_keys = list(response.keys())
+        debug_log(f"Top-level keys in response: {top_keys}")
 
-        # --- 1) Check if this looks like a Bedrock Agent response
-        if isinstance(response, dict) and "modelInvocationOutput" in response:
+        # --- 1) If it looks like a Bedrock Agent response with 'modelInvocationOutput'
+        if "modelInvocationOutput" in response:
             debug_log("Detected 'modelInvocationOutput' key -> Attempting to parse agent response")
             agent_output = response["modelInvocationOutput"]
             raw_resp = agent_output.get("rawResponse", {})
@@ -151,13 +153,11 @@ def process_dict_response(response):
             if raw_json_str:
                 try:
                     parsed_json = json.loads(raw_json_str)
-                    # Log keys inside parsed JSON
                     debug_log(f"Keys in parsed_json: {list(parsed_json.keys())}")
 
-                    # If there's an 'observation' array at the top level of 'response'
+                    # If there's an 'observation' array at the top level
                     if "observation" in response and isinstance(response["observation"], list):
                         debug_log(f"Found 'observation' array with length {len(response['observation'])}")
-                        # Check last observation for finalResponse
                         final_obs = response["observation"][-1]
                         if isinstance(final_obs, dict) and "finalResponse" in final_obs:
                             final_resp = final_obs["finalResponse"].get("text", "")
@@ -165,8 +165,7 @@ def process_dict_response(response):
                                 debug_log(f"Extracted finalResponse.text with length: {len(final_resp)}")
                                 return final_resp
 
-                    # Otherwise, parse the 'content' array in the parsed JSON
-                    # which is where Claude/LLM might store chunks
+                    # Otherwise, parse the 'content' array
                     if "content" in parsed_json and isinstance(parsed_json["content"], list):
                         text_chunks = []
                         for item in parsed_json["content"]:
@@ -177,27 +176,48 @@ def process_dict_response(response):
                             debug_log(f"Extracted joined_text with length: {len(joined_text)}")
                             return joined_text
 
-                    # If we get here, we didn't find text anywhere
-                    debug_log("No text found in 'observation' or 'content'.")
+                    debug_log("No text found in 'observation' or 'content' for Agent response.")
                     return "No response generated from Bedrock Agent."
 
                 except json.JSONDecodeError as jerr:
                     debug_log(f"JSONDecodeError parsing Agent 'rawResponse': {str(jerr)}")
                     return "Error: Failed to parse the Agent rawResponse JSON."
 
-        # --- 2) Check for a standard model-based response (Completion API)
-        debug_log("Checking for standard 'completion' structure (model style).")
-        completion = response.get("completion", {})
-        if isinstance(completion, dict):
-            prompt_output = completion.get("promptOutput", {})
-            debug_log(f"prompt_output keys: {list(prompt_output.keys())} if dict")
-            if isinstance(prompt_output, dict):
-                text = prompt_output.get("text", "")
-                if text:
-                    debug_log(f"Extracted text from promptOutput with length: {len(text)}")
-                    return text
+        # --- 2) Check for a standard model-based response with top-level "completion"
+        if "completion" in response:
+            debug_log("Detected top-level 'completion' key -> Attempting to parse model style response")
+            completion = response["completion"]
+            # Log the completion dict
+            debug_log(f"completion: {completion}")
+
+            if not isinstance(completion, dict):
+                debug_log("completion is not a dict, can't parse further.")
+                return "Error: Invalid 'completion' format"
+
+            # Check for standard structure
+            if "promptOutput" in completion:
+                prompt_output = completion["promptOutput"]
+                debug_log(f"Found 'promptOutput' in completion. Keys: {list(prompt_output.keys()) if isinstance(prompt_output, dict) else 'not dict'}")
+                if isinstance(prompt_output, dict):
+                    text = prompt_output.get("text", "")
+                    if text:
+                        debug_log(f"Extracted text from completion.promptOutput with length: {len(text)}")
+                        return text
+                    else:
+                        debug_log("No text in promptOutput.")
+            
+            # If no promptOutput, see if there's a direct 'text' key in 'completion'
+            if "text" in completion:
+                text_val = completion["text"]
+                if text_val:
+                    debug_log(f"Extracted text from completion['text'] with length: {len(text_val)}")
+                    return text_val
                 else:
-                    debug_log("No text in promptOutput.")
+                    debug_log("completion['text'] is empty.")
+            
+            # Potentially other structures in completion?
+            debug_log("No recognized sub-structure in 'completion'. Returning error.")
+            return "Error: Invalid response format"
 
         # If everything fails, we log out the fallback
         debug_log("No recognized response format found. Returning error.")
