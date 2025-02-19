@@ -38,8 +38,11 @@ def init_session_state():
         st.session_state.trace = {}
 
 # Page setup
-st.set_page_config(page_title=st.secrets.get("UI_TITLE", "SOUTHERN AG AGENT"), layout="wide")
-st.title(st.secrets.get("UI_TITLE", "SOUTHERN AG AGENT"))
+st.set_page_config(
+    page_title=st.secrets.get("UI_TITLE", "thecapitalmarketsagent"),
+    layout="wide"
+)
+st.title(st.secrets.get("UI_TITLE", "thecapitalmarketsagent"))
 
 # Debug mode toggle
 with st.sidebar:
