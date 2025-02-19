@@ -4,6 +4,9 @@
 # In[ ]:
 
 
+#!/usr/bin/env python
+# coding: utf-8
+
 import json
 import logging
 import os
@@ -23,11 +26,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Bedrock Agent Configuration
-BEDROCK_AGENT_ID = "VLZFRY26GV"
-BEDROCK_AGENT_ALIAS_ID = "W7PPFVVEG4"
-UI_TITLE = "SOUTHERN AG AGENT"
-
 def init_session_state():
     """Ensures all necessary session state variables are defined."""
     if "session_id" not in st.session_state:
@@ -40,8 +38,8 @@ def init_session_state():
         st.session_state.trace = {}
 
 # Page setup
-st.set_page_config(page_title=UI_TITLE, layout="wide")
-st.title(UI_TITLE)
+st.set_page_config(page_title=st.secrets.get("UI_TITLE", "SOUTHERN AG AGENT"), layout="wide")
+st.title(st.secrets.get("UI_TITLE", "SOUTHERN AG AGENT"))
 
 # Debug mode toggle
 with st.sidebar:
@@ -80,6 +78,16 @@ try:
 except Exception as e:
     logger.error(f"Error setting up AWS credentials: {str(e)}")
     st.error("Failed to configure AWS credentials. Please check your secrets configuration.")
+    st.stop()
+
+# Get Bedrock agent configuration from secrets
+try:
+    BEDROCK_AGENT_ID = st.secrets["bedrock"]["agent_id"]
+    BEDROCK_AGENT_ALIAS_ID = st.secrets["bedrock"]["agent_alias_id"]
+    logger.info(f"Loaded Bedrock agent configuration from secrets")
+except Exception as e:
+    logger.error(f"Error loading Bedrock agent configuration: {str(e)}")
+    st.error("Failed to load Bedrock agent configuration from secrets. Please check your secrets configuration.")
     st.stop()
 
 # Initialize Bedrock client
